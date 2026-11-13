@@ -51,6 +51,37 @@ func TestReviewEmptyDataChunk(t *testing.T) {
 	mustLack(t, got, "peak")
 }
 
+// GPT-6.1 Terra: a data chunk that ends inside a sample frame is cut short
+// or malformed, not a clean end.
+func TestReviewPartialFrame(t *testing.T) {
+	var f bytes.Buffer
+	binary.Write(&f, binary.LittleEndian, []uint16{1, 1})
+	binary.Write(&f, binary.LittleEndian, []uint32{8000, 16000})
+	binary.Write(&f, binary.LittleEndian, []uint16{2, 16})
+	wav := func(declared uint32, data []byte) string {
+		var b bytes.Buffer
+		b.WriteString("RIFF")
+		binary.Write(&b, binary.LittleEndian, uint32(36+len(data)))
+		b.WriteString("WAVEfmt ")
+		binary.Write(&b, binary.LittleEndian, uint32(16))
+		b.Write(f.Bytes())
+		b.WriteString("data")
+		binary.Write(&b, binary.LittleEndian, declared)
+		b.Write(data)
+		p := filepath.Join(t.TempDir(), "p.wav")
+		os.WriteFile(p, b.Bytes(), 0o644)
+		return p
+	}
+	out, code := lensRun(t, wav(5, []byte{0, 0x40, 0, 0x40}))
+	if code != 2 || !strings.Contains(out, "warning   the file ends early") {
+		t.Errorf("declared 5, has 4: exit %d\n%s", code, out)
+	}
+	out, code = lensRun(t, wav(5, []byte{0, 0x40, 0, 0x40, 7}))
+	if code != 2 || !strings.Contains(out, "ends in a partial sample frame (1 byte left over)") {
+		t.Errorf("an odd byte: exit %d\n%s", code, out)
+	}
+}
+
 // GPT-6.1 Terra: a truncated MP3 says so instead of passing for a short one.
 func TestReviewTruncatedMP3(t *testing.T) {
 	raw, err := os.ReadFile("testdata/tone.mp3")
@@ -466,15 +497,25 @@ func TestReviewOppositePhaseTone(t *testing.T) {
 
 // Sonnet 5.5: loudness weights follow the speaker layout.
 func TestReviewChannelWeights(t *testing.T) {
-	got := channelWeights(8, 0)
+	got := channelWeights(8, 0, "")
 	want := []float64{1, 1, 1, 0, 1.41, 1.41, 1.41, 1.41}
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("7.1 weights %v, want %v", got, want)
 		}
 	}
-	if w := channelWeights(6, 0x60f); w[3] != 0 || w[4] != 1.41 { // 5.1 with side channels
+	if w := channelWeights(6, 0x60f, ""); w[3] != 0 || w[4] != 1.41 { // 5.1 with side channels
 		t.Errorf("5.1(side) weights %v", w)
+	}
+	// GPT-6.1 Terra: ffmpeg's layout for what it decodes counts too
+	if w := channelWeights(3, 0, "2.1"); w[2] != 0 || w[0] != 1 {
+		t.Errorf("2.1 weights %v", w)
+	}
+	if w := channelWeights(3, 0, "FL+FR+LFE"); w[2] != 0 {
+		t.Errorf("FL+FR+LFE weights %v", w)
+	}
+	if w := channelWeights(3, 0, "3.0"); w[2] != 1 {
+		t.Errorf("3.0 weights %v", w)
 	}
 	// a tone in the LFE alone has no loudness
 	const r = 8000

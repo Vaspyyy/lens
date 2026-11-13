@@ -38,6 +38,7 @@ type audioInfo struct {
 	audio    int64  // bytes of sound without tags and cover art, when known
 	warn     string // what's wrong with the file around the sound
 	mask     uint32 // WAV's channel mask: which speaker each channel is
+	layout   string // ffmpeg's channel layout: "5.1(side)", "2.1", "FL+FR+LFE"
 }
 
 // maxChannels is the most channels lens takes a file to have.
@@ -221,6 +222,15 @@ func (w *wavReader) Read(p []float32) (int, error) {
 	n := len(p) / w.ch * frame
 	if w.left >= 0 && int64(n) > w.left {
 		n = int(w.left) / frame * frame
+	}
+	if n == 0 && w.left > 0 { // less than a frame is left of the data
+		rest := make([]byte, w.left)
+		got, _ := io.ReadFull(w.r, rest)
+		w.left -= int64(got)
+		if w.left > 0 {
+			return 0, w.truncated()
+		}
+		return 0, fmt.Errorf("the data chunk ends in a partial sample frame (%s left over)", plural(got, "byte"))
 	}
 	if n == 0 {
 		return 0, io.EOF
@@ -636,6 +646,7 @@ type probe struct {
 		Channels    int    `json:"channels"`
 		BitsRaw     string `json:"bits_per_raw_sample"`
 		BitRate     string `json:"bit_rate"`
+		Layout      string `json:"channel_layout"`
 		Disposition struct {
 			AttachedPic int `json:"attached_pic"`
 		} `json:"disposition"`
@@ -678,7 +689,7 @@ func openFFmpeg(path string, kind fileKind, why error) (pcmReader, audioInfo, er
 	}
 	in = "file:" + in
 	pc := exec.Command("ffprobe", "-v", "error", "-show_entries",
-		"stream=codec_type,codec_name,sample_rate,channels,bits_per_raw_sample,bit_rate:stream_disposition=attached_pic:format=format_name",
+		"stream=codec_type,codec_name,sample_rate,channels,channel_layout,bits_per_raw_sample,bit_rate:stream_disposition=attached_pic:format=format_name",
 		"-of", "json", in)
 	pc.Stderr = &stderr
 	js, err := pc.Output()
@@ -713,6 +724,7 @@ func openFFmpeg(path string, kind fileKind, why error) (pcmReader, audioInfo, er
 	s := p.Streams[audio]
 	info.rate, _ = strconv.Atoi(s.SampleRate)
 	info.ch = s.Channels
+	info.layout = s.Layout
 	if info.rate <= 0 || info.ch <= 0 || info.ch > maxChannels {
 		return nil, info, fmt.Errorf("ffprobe gives %d channels at %d Hz", info.ch, info.rate)
 	}

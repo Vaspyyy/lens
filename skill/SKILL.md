@@ -37,7 +37,6 @@ changed  16,260 pixels (1.8%) in 2 spots, the largest difference 76%
   spot 1  97x97+40+600   9,409 pixels
   spot 2  221x31+900+30  6,851 pixels
 crop     one per spot, since one crop around all would be 87% of the image
-  magick before.png -crop 253x63+884+14 +repage before-crop1.png
   spot 1:
   magick before.png -crop 129x129+24+584 +repage before-crop1.png
   magick after.png -crop 129x129+24+584 +repage after-crop1.png

@@ -6,6 +6,7 @@ import (
 	"math/bits"
 	"math/cmplx"
 	"sort"
+	"strings"
 )
 
 const (
@@ -97,7 +98,7 @@ func newSound(path string, info audioInfo, threshold float64) *soundFacts {
 	s.blockLen = max(1, s.rate/1000)
 	s.subLen = max(1, s.rate/10)
 	s.kf = make([]kFilter, s.ch)
-	s.kw = channelWeights(s.ch, info.mask)
+	s.kw = channelWeights(s.ch, info.mask, info.layout)
 	for c := range s.kf {
 		s.kf[c] = newKFilter(float64(s.rate))
 	}
@@ -409,8 +410,23 @@ func (s *soundFacts) finish() {
 
 // channelWeights are BS.1770's channel weights, as ffmpeg's ebur128 gives
 // them: 0 for the LFE, 1.41 for back and side channels, 1 for the rest.
-// The layout is the WAV channel mask, or the usual one for the count.
-func channelWeights(ch int, mask uint32) []float64 {
+// The layout is ffmpeg's for the decoded channels, the WAV channel mask,
+// or the usual one for the count.
+func channelWeights(ch int, mask uint32, layout string) []float64 {
+	if names := layoutNames(layout); len(names) == ch {
+		w := make([]float64, ch)
+		for i, n := range names {
+			switch n {
+			case "LFE", "LFE2":
+				w[i] = 0
+			case "BL", "BR", "BC", "SL", "SR", "TBL", "TBC", "TBR", "SDL", "SDR":
+				w[i] = 1.41
+			default:
+				w[i] = 1
+			}
+		}
+		return w
+	}
 	usual := map[int]uint32{1: 0x4, 2: 0x3, 3: 0x7, 4: 0x33, 5: 0x37, 6: 0x3f, 7: 0x70f, 8: 0x63f}
 	if bits.OnesCount32(mask) != ch {
 		mask = usual[ch]
@@ -433,6 +449,63 @@ func channelWeights(ch int, mask uint32) []float64 {
 		i++
 	}
 	return w
+}
+
+// ffLayouts are ffmpeg's standard channel layouts, in the order ffmpeg
+// gives the channels (ffmpeg -layouts).
+var ffLayouts = func() map[string][]string {
+	m := map[string][]string{}
+	for _, l := range strings.Split(`mono FC
+stereo FL+FR
+2.1 FL+FR+LFE
+3.0 FL+FR+FC
+3.0(back) FL+FR+BC
+4.0 FL+FR+FC+BC
+quad FL+FR+BL+BR
+quad(side) FL+FR+SL+SR
+3.1 FL+FR+FC+LFE
+5.0 FL+FR+FC+BL+BR
+5.0(side) FL+FR+FC+SL+SR
+4.1 FL+FR+FC+LFE+BC
+5.1 FL+FR+FC+LFE+BL+BR
+5.1(side) FL+FR+FC+LFE+SL+SR
+6.0 FL+FR+FC+BC+SL+SR
+6.0(front) FL+FR+FLC+FRC+SL+SR
+3.1.2 FL+FR+FC+LFE+TFL+TFR
+hexagonal FL+FR+FC+BL+BR+BC
+6.1 FL+FR+FC+LFE+BC+SL+SR
+6.1(back) FL+FR+FC+LFE+BL+BR+BC
+6.1(front) FL+FR+LFE+FLC+FRC+SL+SR
+7.0 FL+FR+FC+BL+BR+SL+SR
+7.0(front) FL+FR+FC+FLC+FRC+SL+SR
+7.1 FL+FR+FC+LFE+BL+BR+SL+SR
+7.1(wide) FL+FR+FC+LFE+BL+BR+FLC+FRC
+7.1(wide-side) FL+FR+FC+LFE+FLC+FRC+SL+SR
+5.1.2 FL+FR+FC+LFE+SL+SR+TFL+TFR
+5.1.2(back) FL+FR+FC+LFE+BL+BR+TFL+TFR
+octagonal FL+FR+FC+BL+BR+BC+SL+SR
+cube FL+FR+BL+BR+TFL+TFR+TBL+TBR
+5.1.4 FL+FR+FC+LFE+SL+SR+TFL+TFR+TBL+TBR
+7.1.2 FL+FR+FC+LFE+BL+BR+SL+SR+TFL+TFR
+7.1.4 FL+FR+FC+LFE+BL+BR+SL+SR+TFL+TFR+TBL+TBR
+7.2.3 FL+FR+FC+LFE+BL+BR+SL+SR+TFL+TFR+TBC+LFE2
+9.1.4 FL+FR+FC+LFE+BL+BR+FLC+FRC+SL+SR+TFL+TFR+TBL+TBR`, "\n") {
+		name, chans, _ := strings.Cut(l, " ")
+		m[name] = strings.Split(chans, "+")
+	}
+	return m
+}()
+
+// layoutNames are the channels of an ffmpeg layout, by name or spelled
+// out ("FL+FR+LFE"); nil for one lens doesn't know.
+func layoutNames(layout string) []string {
+	if names, ok := ffLayouts[layout]; ok {
+		return names
+	}
+	if strings.Contains(layout, "+") {
+		return strings.Split(layout, "+")
+	}
+	return nil
 }
 
 func dbToLin(db float64) float64 { return math.Pow(10, db/20) }
