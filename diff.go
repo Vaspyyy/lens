@@ -57,6 +57,7 @@ func runDiff(out io.Writer, o options) int {
 		}
 		fs[i] = f
 	}
+	o.pad = min(o.pad, max(fs[0].w, fs[0].h, fs[1].w, fs[1].h)) // no overflow in the boxes
 	d := compare(fs[0], fs[1], o)
 	renderDiff(out, d, o)
 	if o.picture != "" && d.changed == 0 {

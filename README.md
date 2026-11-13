@@ -114,7 +114,7 @@ lens: 2 images, 1 sound
   sprites/click.ogg  442 ms  Ogg Vorbis 44.1 kHz stereo  -2.7 dB  -8.3  9 ms / 192 ms      │█████████▇▇▇▆▅          │
 ```
 
-One line per file, images and sounds in their own tables. A folder is read one level deep, and what isn't an image or a sound in it is counted, not listed. Files that can't be read are listed at the end with the reason, sounds with a warning get it under their table, and lens exits with 2; so does a folder with nothing to show.
+One line per file, images and sounds in their own tables. A folder is read one level deep, and what isn't an image or a sound in it is counted, not listed. Files that can't be opened are named at the top, files that can't be decoded are listed at the end with the reason, sounds with a warning get it under their table, and lens exits with 2; so does a folder with nothing to show.
 
 ### Flags
 

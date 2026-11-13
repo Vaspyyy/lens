@@ -27,7 +27,7 @@ func dbText(x float64) string {
 	if x <= 0 {
 		return "-inf dBFS"
 	}
-	return strings.Replace(fmt.Sprintf("%.1f dBFS", linToDB(x)), "-0.0 ", "0.0 ", 1)
+	return oneDecimal(linToDB(x)) + " dBFS"
 }
 
 // secText is a time for people: 12 ms, 1.25 s, 3:25.4.
@@ -35,6 +35,8 @@ func secText(s float64) string {
 	switch {
 	case math.Round(s*1000) < 1000:
 		return fmt.Sprintf("%.0f ms", s*1000)
+	case s > 1e8: // past what a time.Duration holds well: a header's nonsense
+		return fmt.Sprintf("%.3g s", s)
 	}
 	return durText(secDur(s))
 }
@@ -92,9 +94,18 @@ func lufsText(s *soundFacts) string {
 	case math.IsInf(s.lufs, -1):
 		return "loudness: silent"
 	case s.lufsEst:
-		return fmt.Sprintf("loudness ≈%.1f LUFS (under 400 ms, so over the whole clip)", s.lufs)
+		return fmt.Sprintf("loudness ≈%s LUFS (under 400 ms, so over the whole clip)", oneDecimal(s.lufs))
 	}
-	return fmt.Sprintf("loudness %.1f LUFS", s.lufs)
+	return fmt.Sprintf("loudness %s LUFS", oneDecimal(s.lufs))
+}
+
+// oneDecimal is %.1f without a "-0.0".
+func oneDecimal(x float64) string {
+	s := fmt.Sprintf("%.1f", x)
+	if s == "-0.0" {
+		return "0.0"
+	}
+	return s
 }
 
 func clipText(s *soundFacts) string {

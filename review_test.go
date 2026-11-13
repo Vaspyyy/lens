@@ -94,7 +94,7 @@ func TestReviewTruncatedMP3(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("exit %d: %s", code, out)
 	}
-	mustContain(t, out, "warning   the file ends early: its LAME header promises 490 ms of sound")
+	mustContain(t, out, "warning   frames are missing (cut short or damaged): its LAME header promises 490 ms of sound")
 }
 
 // GPT-6.1 Terra: with more spots than are listed, the crop still covers all
@@ -660,4 +660,46 @@ func TestRecheckWordsAndNames(t *testing.T) {
 	if w := channelWeights(3, 0, ""); w[2] != 0 {
 		t.Errorf("3 channels without a mask: %v, want ffmpeg's 2.1", w)
 	}
+}
+
+// Sonnet 5.5, re-check: no "-0.0", no overflowing pads or times.
+func TestRecheckSonnetSlips(t *testing.T) {
+	if got := oneDecimal(-0.04); got != "0.0" {
+		t.Errorf("oneDecimal(-0.04) = %q", got)
+	}
+	if got := secText(4.6e18); !strings.Contains(got, "e+18 s") {
+		t.Errorf("secText(4.6e18) = %q", got)
+	}
+	dir := t.TempDir()
+	a := canvas(50, 40, white)
+	b := canvas(50, 40, white)
+	rect(b, image.Rect(10, 10, 20, 20), black)
+	out, _ := lensRun(t, "diff", "--pad", "9223372036854775807", savePNG(t, dir, "a.png", opaqueRGB(a)), savePNG(t, dir, "b.png", opaqueRGB(b)))
+	mustContain(t, out, "crop     50x40+0+0 for both")
+	// RF64 with an impossible ds64 size reads what's there
+	plain := filepath.Join(dir, "plain.wav")
+	writeWAV(t, plain, wavSpec{rate: 8000}, sine(8000, 440, 1, -10))
+	raw, _ := os.ReadFile(plain)
+	fmtAt, dataAt := bytes.Index(raw, []byte("fmt ")), bytes.Index(raw, []byte("data"))
+	var rf bytes.Buffer
+	rf.WriteString("RF64\xff\xff\xff\xffWAVEds64")
+	binary.Write(&rf, binary.LittleEndian, uint32(28))
+	binary.Write(&rf, binary.LittleEndian, []uint64{0, 1 << 62, 0})
+	binary.Write(&rf, binary.LittleEndian, uint32(0))
+	rf.Write(raw[fmtAt:dataAt])
+	rf.WriteString("data\xff\xff\xff\xff")
+	rf.Write(raw[dataAt+8:])
+	p := filepath.Join(dir, "rf.wav")
+	os.WriteFile(p, rf.Bytes(), 0o644)
+	out, code := lensRun(t, p)
+	if code != 0 || !strings.Contains(out, "1.00 s, 8 kHz mono") {
+		t.Errorf("RF64 with 2^62: exit %d\n%s", code, out)
+	}
+	// short by less than the precision shown
+	short := filepath.Join(dir, "short.wav")
+	writeWAV(t, short, wavSpec{rate: 8000}, sine(8000, 440, 3, -10))
+	raw, _ = os.ReadFile(short)
+	os.WriteFile(short, raw[:len(raw)-4], 0o644)
+	out, _ = lensRun(t, short)
+	mustContain(t, out, "warning   the file ends early: 4 bytes short of the data its header promises")
 }

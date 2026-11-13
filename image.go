@@ -98,7 +98,7 @@ func loadImage(path string, kind fileKind) (*imageFacts, error) {
 	}
 	if cfg, _, err := image.DecodeConfig(bytes.NewReader(raw)); err == nil && int64(cfg.Width)*int64(cfg.Height) > maxPixels {
 		return nil, fmt.Errorf("%dx%d is over %s pixels; lens doesn't decode images this big (it would need about %.0f GB of memory)",
-			cfg.Width, cfg.Height, count(maxPixels), float64(cfg.Width)*float64(cfg.Height)*8/1e9)
+			cfg.Width, cfg.Height, count(maxPixels), float64(cfg.Width)*float64(cfg.Height)*10/1e9)
 	}
 	var m image.Image
 	if kind == kGIF {
@@ -122,7 +122,8 @@ func loadImage(path string, kind fileKind) (*imageFacts, error) {
 	return f, nil
 }
 
-// maxPixels is the most lens decodes: 16384x16384, about 2 GB at work.
+// maxPixels is the most lens decodes: 16384x16384, about 2.7 GB at work
+// (about 10 bytes a pixel for an 8-bit image, more for 16-bit).
 const maxPixels = 16384 * 16384
 
 // tiffFacts reads the first directory: the photometric kind, the bits a

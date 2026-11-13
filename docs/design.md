@@ -159,7 +159,8 @@ file in about 4,000 slices.
 ## Output rules
 
 The family's: plain text, a budget (`-b N`, about 60 lines), counts for what
-is cut, `next:` lines with a command worth running. Exit code 0 shown, 2 bad
+is cut, `next:` lines with a command worth running. A sound cut short or
+damaged is shown with a `warning` line and exits 2. Exit code 0 shown, 2 bad
 input (a file that isn't an image or audio, or can't be decoded). `diff`
 exits 0 whether the images differ or not, since the card says which.
 

@@ -71,7 +71,7 @@ Compare takes with `lens a.mp3 b.mp3` (one line each). `-o clip.png` writes the 
 ## Other
 
 - A folder: `lens assets/` gives one line per image and sound (one level deep).
-- Opus, FLAC, M4A and low-rate (MPEG-2) MP3s need ffmpeg installed; WAV, 44.1/48 kHz MP3, Ogg Vorbis and all images don't.
+- Opus, FLAC, M4A, low-rate (MPEG-2 and 2.5) MP3s and A-law, µ-law or ADPCM WAVs need ffmpeg installed; PCM and float WAV, 32/44.1/48 kHz MP3, Ogg Vorbis (chained too) and all images don't.
 - A `warning` line means the file is cut short or damaged: the numbers are of the part that was read.
 - Video files are named, not read (use ffprobe).
 - Exit code 0 shown (diff too, changed or not); 2 bad input, a file not read, or a sound that ends early or stops decoding (shown with a `warning` line: the numbers are of the part read).

@@ -155,7 +155,7 @@ func soundRow(s *soundFacts) []string {
 	if math.IsNaN(s.lufs) {
 		lufs = "not measured"
 	} else if !math.IsInf(s.lufs, -1) {
-		lufs = fmt.Sprintf("%.1f", s.lufs)
+		lufs = oneDecimal(s.lufs)
 		if s.lufsEst {
 			lufs = "≈" + lufs
 		}

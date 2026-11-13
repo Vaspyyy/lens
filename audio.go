@@ -128,8 +128,11 @@ func chunkNext(r *bufio.Reader) bool {
 // truncated says how much of the promised sound the file holds.
 func (w *wavReader) truncated() error {
 	frame := float64(w.bits / 8 * w.ch * w.rate)
-	return fmt.Errorf("the file ends early: its header promises %s of sound, the file holds %s",
-		secText(float64(w.declared)/frame), secText(float64(w.declared-w.left)/frame))
+	want, got := float64(w.declared)/frame, float64(w.declared-w.left)/frame
+	if secText(want) == secText(got) { // short by less than the precision shown
+		return fmt.Errorf("the file ends early: %s short of the data its header promises", plural(int(w.left), "byte"))
+	}
+	return fmt.Errorf("the file ends early: its header promises %s of sound, the file holds %s", secText(want), secText(got))
 }
 
 func openWAV(path string) (pcmReader, audioInfo, error) {
@@ -203,8 +206,10 @@ func readWAVHeader(f *os.File) (*wavReader, audioInfo, error) {
 				return nil, info, fmt.Errorf("a WAV file with its data before its fmt chunk")
 			}
 			switch {
-			case rf64 && ds64 >= 0:
+			case rf64 && ds64 >= 0 && ds64 < 1<<48:
 				w.left = ds64
+			case rf64:
+				w.left = -1 // an impossible ds64 size: read what's there
 			case n == 0xffffffff, n >= 0x7fff0000:
 				w.left = -1 // a placeholder, as a WAV written to a pipe has
 			case n == 0 && (riffSize == 0 || riffSize == 0xffffffff || !chunkNext(r)):
@@ -365,7 +370,7 @@ func openMP3(path string) (pcmReader, audioInfo, error) {
 			}
 			info.expect = float64(n) / float64(h.rate)
 		}
-		return nil, info, fmt.Errorf("%w: this MP3 (MPEG-2 or 2.5, which needs ffmpeg)", errUnsupported)
+		return nil, info, fmt.Errorf("%w: an MPEG-2 or 2.5 MP3", errUnsupported)
 	}
 	d, err := mp3.NewDecoder(bufio.NewReaderSize(f, 1<<16))
 	if err != nil {
@@ -426,7 +431,7 @@ func (m *mp3Reader) Read(p []float32) (int, error) {
 			return 0, fmt.Errorf("can't decode it past %s: %v", secText(float64(m.done)/float64(m.rate)), err)
 		}
 		if got == 0 && m.left >= 576 { // half a frame short or more: frames went missing
-			return 0, fmt.Errorf("the file ends early: its LAME header promises %s of sound, the file holds %s",
+			return 0, fmt.Errorf("frames are missing (cut short or damaged): its LAME header promises %s of sound, the file holds %s",
 				secText(float64(m.done+m.left)/float64(m.rate)), secText(float64(m.done)/float64(m.rate)))
 		}
 		k := 0
