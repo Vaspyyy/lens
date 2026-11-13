@@ -564,3 +564,100 @@ func TestReviewErrorWords(t *testing.T) {
 		t.Errorf("dbText(full scale) = %q", got)
 	}
 }
+
+// Opus 5.5, re-check: chained Ogg is clean, a flipped FLAC byte and cut
+// files on the ffmpeg path warn.
+func TestRecheckFFmpegPaths(t *testing.T) {
+	needFFmpeg(t)
+	dir := t.TempDir()
+	mk := func(name string, args ...string) string {
+		p := filepath.Join(dir, name)
+		all := append([]string{"-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=3"}, args...)
+		if err := exec.Command("ffmpeg", append(all, p)...).Run(); err != nil {
+			t.Skip("ffmpeg can't make ", name, ": ", err)
+		}
+		return p
+	}
+	a := mk("a.ogg", "-c:a", "libvorbis")
+	b := mk("b.ogg", "-c:a", "libvorbis", "-q:a", "8")
+	ra, _ := os.ReadFile(a)
+	rb, _ := os.ReadFile(b)
+	chain := filepath.Join(dir, "chain.ogg")
+	os.WriteFile(chain, append(ra, rb...), 0o644)
+	out, code := lensRun(t, chain)
+	if code != 0 || strings.Contains(out, "warning") {
+		t.Errorf("chained Ogg: exit %d\n%s", code, out)
+	}
+	mustContain(t, out, "6.00 s")
+
+	fl, _ := os.ReadFile(mk("f.flac", "-c:a", "flac"))
+	fl[len(fl)*2/3] ^= 0xff
+	flipped := filepath.Join(dir, "flipped.flac")
+	os.WriteFile(flipped, fl, 0o644)
+	if out, code := lensRun(t, flipped); code != 2 || !strings.Contains(out, "warning   ffmpeg reports a problem") {
+		t.Errorf("flipped FLAC byte: exit %d\n%s", code, out)
+	}
+
+	for _, c := range []struct{ name string }{{"alaw.wav"}, {"m2.mp3"}} {
+		var p string
+		if c.name == "alaw.wav" {
+			p = mk(c.name, "-c:a", "pcm_alaw")
+		} else {
+			p = filepath.Join(dir, c.name)
+			if err := exec.Command("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=3:sample_rate=22050",
+				"-c:a", "libmp3lame", "-b:a", "32k", p).Run(); err != nil {
+				t.Skip(err)
+			}
+		}
+		raw, _ := os.ReadFile(p)
+		cut := filepath.Join(dir, "cut-"+c.name)
+		os.WriteFile(cut, raw[:len(raw)/2], 0o644)
+		out, code := lensRun(t, cut)
+		if code != 2 || !strings.Contains(out, "warning   the file ends early: its header promises 3.00 s") {
+			t.Errorf("cut %s: exit %d\n%s", c.name, code, out)
+		}
+	}
+}
+
+// Opus 5.5, re-check: a data size left at 0 or at a pipe's placeholder is
+// read to the end of the file, without a warning.
+func TestRecheckWAVPlaceholders(t *testing.T) {
+	x := sine(8000, 440, 2, -10)
+	for _, size := range []int64{0, 0x80000000, 0x7ffff000} {
+		p := filepath.Join(t.TempDir(), "p.wav")
+		writeWAV(t, p, wavSpec{rate: 8000, dataSize: size}, x)
+		raw, _ := os.ReadFile(p)
+		if size == 0 { // a real RIFF size, as a killed writer leaves it
+			binary.LittleEndian.PutUint32(raw[4:8], 36)
+			os.WriteFile(p, raw, 0o644)
+		}
+		out, code := lensRun(t, p)
+		if code != 0 || !strings.Contains(out, "2.00 s, 8 kHz mono") {
+			t.Errorf("data size %#x: exit %d\n%s", size, code, out)
+		}
+	}
+}
+
+// Opus 5.5, re-check: wording for mostly clear borders, crop names that
+// collide or overwrite an input, and ffmpeg's guess for 3 channels.
+func TestRecheckWordsAndNames(t *testing.T) {
+	dir := t.TempDir()
+	m := canvas(100, 100, clear)
+	rect(m, image.Rect(0, 20, 51, 71), violet)
+	out, _ := lensRun(t, savePNG(t, dir, "touch.png", m))
+	mustContain(t, out, "of the border is clear")
+	mustLack(t, out, "only the corners")
+
+	if st := cropStems("shot.jpg", "./shot.png", 1, false); st[0] == "" {
+		t.Errorf("shot.jpg and ./shot.png: stems %q", st)
+	}
+	if st := cropStems("x.png", "x-crop.png", 1, false); st[0] == "" {
+		t.Errorf("x.png and x-crop.png: stems %q", st)
+	}
+	if st := cropStems("a.png", "b.png", 3, true); st[0] != "" {
+		t.Errorf("a.png and b.png: stems %q", st)
+	}
+	if w := channelWeights(3, 0, ""); w[2] != 0 {
+		t.Errorf("3 channels without a mask: %v, want ffmpeg's 2.1", w)
+	}
+}

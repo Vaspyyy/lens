@@ -32,13 +32,13 @@ type audioInfo struct {
 	detail   string // "PCM 16-bit", "float 32-bit"
 	rate, ch int
 	size     int64
-	lossy    bool   // a bitrate is worth showing
-	bits     int    // integer PCM's bits a sample, for where full scale is
-	bitrate  int    // bits a second, when the stream says
-	audio    int64  // bytes of sound without tags and cover art, when known
-	warn     string // what's wrong with the file around the sound
-	mask     uint32 // WAV's channel mask: which speaker each channel is
-	layout   string // ffmpeg's channel layout: "5.1(side)", "2.1", "FL+FR+LFE"
+	lossy    bool    // a bitrate is worth showing
+	bits     int     // integer PCM's bits a sample, for where full scale is
+	audio    int64   // bytes of sound without tags and cover art, when known
+	warn     string  // what's wrong with the file around the sound
+	mask     uint32  // WAV's channel mask: which speaker each channel is
+	layout   string  // ffmpeg's channel layout: "5.1(side)", "2.1", "FL+FR+LFE"
+	expect   float64 // seconds of sound a header promises, when ffmpeg decodes
 }
 
 // maxChannels is the most channels lens takes a file to have.
@@ -56,27 +56,27 @@ func openAudio(path string, kind fileKind) (pcmReader, audioInfo, error) {
 	var r pcmReader
 	var info audioInfo
 	var err error
+	var oggWarn string
+	var starts []int64
+	if kind == kVorbis || kind == kOgg {
+		starts, oggWarn = oggPages(path)
+	}
 	switch kind {
 	case kWAV:
 		r, info, err = openWAV(path)
 	case kMP3:
 		r, info, err = openMP3(path)
 	case kVorbis:
-		r, info, err = openVorbis(path)
+		r, info, err = openVorbis(path, starts)
 	default:
 		err = errUnsupported
 	}
-	var oggWarn string
-	if kind == kVorbis || kind == kOgg {
-		streams, problem := oggPages(path)
-		oggWarn = problem
-		if streams > 1 && err == nil { // chained streams: ffmpeg plays them all
-			r.Close()
-			err = fmt.Errorf("%w: chained Ogg", errUnsupported)
-		}
-	}
 	if errors.Is(err, errUnsupported) {
+		expect := info.expect // what the header promised, for after ffmpeg
 		r, info, err = openFFmpeg(path, kind, err)
+		if info.expect == 0 {
+			info.expect = expect
+		}
 	}
 	if err != nil && oggWarn != "" { // say what's wrong with the file first
 		err = fmt.Errorf("%s; %v", oggWarn, err)
@@ -86,6 +86,12 @@ func openAudio(path string, kind fileKind) (pcmReader, audioInfo, error) {
 		info.warn = oggWarn
 	}
 	return r, info, err
+}
+
+func haveFFmpeg() bool {
+	_, e1 := exec.LookPath("ffmpeg")
+	_, e2 := exec.LookPath("ffprobe")
+	return e1 == nil && e2 == nil
 }
 
 // --- WAV
@@ -101,6 +107,22 @@ type wavReader struct {
 
 	declared int64 // the data chunk's size, -1 unknown
 	rate     int
+	byteRate int
+}
+
+// chunkNext: the next bytes start a RIFF chunk (four letters), so an empty
+// data chunk is really empty and not a size left at 0.
+func chunkNext(r *bufio.Reader) bool {
+	b, _ := r.Peek(8)
+	if len(b) < 8 {
+		return true // nothing after it: empty either way
+	}
+	for _, c := range b[:4] {
+		if c < 0x20 || c > 0x7e {
+			return false
+		}
+	}
+	return true
 }
 
 // truncated says how much of the promised sound the file holds.
@@ -154,6 +176,7 @@ func readWAVHeader(f *os.File) (*wavReader, audioInfo, error) {
 			tag := int(binary.LittleEndian.Uint16(b[0:2]))
 			w.ch = int(binary.LittleEndian.Uint16(b[2:4]))
 			info.rate = int(binary.LittleEndian.Uint32(b[4:8]))
+			w.byteRate = int(binary.LittleEndian.Uint32(b[8:12]))
 			w.bits = int(binary.LittleEndian.Uint16(b[14:16]))
 			if tag == 0xfffe && n >= 26 {
 				info.mask = binary.LittleEndian.Uint32(b[20:24])
@@ -182,8 +205,10 @@ func readWAVHeader(f *os.File) (*wavReader, audioInfo, error) {
 			switch {
 			case rf64 && ds64 >= 0:
 				w.left = ds64
-			case n == 0xffffffff, n == 0 && (riffSize == 0 || riffSize == 0xffffffff):
-				w.left = -1 // a stream that never wrote its sizes
+			case n == 0xffffffff, n >= 0x7fff0000:
+				w.left = -1 // a placeholder, as a WAV written to a pipe has
+			case n == 0 && (riffSize == 0 || riffSize == 0xffffffff || !chunkNext(r)):
+				w.left = -1 // a writer stopped before it fixed the sizes
 			default:
 				w.left = n // 0 too: an empty data chunk is empty
 			}
@@ -201,6 +226,9 @@ func readWAVHeader(f *os.File) (*wavReader, audioInfo, error) {
 				name := names[w.format]
 				if name == "" {
 					name = fmt.Sprintf("format %d, %d-bit", w.format, w.bits)
+				}
+				if w.left > 0 && w.byteRate > 0 { // ffmpeg decodes it; the header says how long
+					info.expect = float64(w.left) / float64(w.byteRate)
 				}
 				return nil, info, fmt.Errorf("%w: WAV with %s", errUnsupported, name)
 			}
@@ -330,6 +358,13 @@ func openMP3(path string) (pcmReader, audioInfo, error) {
 	}
 	if !h.mpeg1 { // go-mp3 gets MPEG-2 and 2.5 wrong or not at all: ffmpeg
 		f.Close()
+		if h.xing && h.frames > 0 && h.rate > 0 { // the length the header promises
+			n := h.frames * h.spf
+			if h.lame {
+				n -= h.delay + h.padding
+			}
+			info.expect = float64(n) / float64(h.rate)
+		}
 		return nil, info, fmt.Errorf("%w: this MP3 (MPEG-2 or 2.5, which needs ffmpeg)", errUnsupported)
 	}
 	d, err := mp3.NewDecoder(bufio.NewReaderSize(f, 1<<16))
@@ -390,7 +425,7 @@ func (m *mp3Reader) Read(p []float32) (int, error) {
 		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
 			return 0, fmt.Errorf("can't decode it past %s: %v", secText(float64(m.done)/float64(m.rate)), err)
 		}
-		if got == 0 && m.left > int64(1152) {
+		if got == 0 && m.left >= 576 { // half a frame short or more: frames went missing
 			return 0, fmt.Errorf("the file ends early: its LAME header promises %s of sound, the file holds %s",
 				secText(float64(m.done+m.left)/float64(m.rate)), secText(float64(m.done)/float64(m.rate)))
 		}
@@ -420,6 +455,7 @@ func (m *mp3Reader) Close() error { return m.f.Close() }
 type mp3Header struct {
 	mono           bool
 	mpeg1          bool
+	rate           int
 	spf            int // samples a frame
 	xing, lame     bool
 	frames         int
@@ -454,6 +490,10 @@ func parseMP3Header(b []byte) mp3Header {
 	ver := (b[i+1] >> 3) & 3 // 3: MPEG-1
 	h.mono = b[i+3]>>6 == 3
 	h.mpeg1 = ver == 3
+	rates := map[byte][3]int{3: {44100, 48000, 32000}, 2: {22050, 24000, 16000}, 0: {11025, 12000, 8000}}
+	if ri := (b[i+2] >> 2) & 3; ri < 3 {
+		h.rate = rates[ver][ri]
+	}
 	side := 32
 	switch {
 	case ver == 3 && h.mono:
@@ -500,24 +540,48 @@ func parseMP3Header(b []byte) mp3Header {
 
 // --- Ogg Vorbis
 
+// vorbisReader decodes Ogg Vorbis, chained files one stream after another
+// (each with its own setup, which ffmpeg gets wrong when it changes).
 type vorbisReader struct {
-	f *os.File
-	r *oggvorbis.Reader
+	f      *os.File
+	r      *oggvorbis.Reader
+	starts []int64 // where each chained stream begins
+	next   int     // the stream to open when this one ends
+	size   int64
+	done   int64 // samples given, for a message
 }
 
-func openVorbis(path string) (pcmReader, audioInfo, error) {
+func (v *vorbisReader) open(i int) (*oggvorbis.Reader, error) {
+	end := v.size
+	if i+1 < len(v.starts) {
+		end = v.starts[i+1]
+	}
+	start := int64(0)
+	if i < len(v.starts) {
+		start = v.starts[i]
+	}
+	return oggvorbis.NewReader(bufio.NewReaderSize(io.NewSectionReader(v.f, start, end-start), 1<<16))
+}
+
+func openVorbis(path string, starts []int64) (pcmReader, audioInfo, error) {
 	info := audioInfo{format: "Ogg Vorbis", lossy: true}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, info, err
 	}
-	r, err := oggvorbis.NewReader(bufio.NewReaderSize(f, 1<<16))
+	v := &vorbisReader{f: f, starts: starts, next: 1}
+	if fi, err := f.Stat(); err == nil {
+		v.size = fi.Size()
+	}
+	v.r, err = v.open(0)
 	if err != nil {
 		f.Close()
 		return nil, info, fmt.Errorf("%w: this Ogg Vorbis file (%v)", errUnsupported, err)
 	}
-	info.rate, info.ch = r.SampleRate(), r.Channels()
-	return &vorbisReader{f: f, r: r}, info, nil
+	info.rate, info.ch = v.r.SampleRate(), v.r.Channels()
+	// the channels come out in WAV's order (vorbisOrder); say which speakers
+	info.mask = map[int]uint32{3: 0x7, 4: 0x33, 5: 0x37, 6: 0x3f, 7: 0x70f, 8: 0x63f}[info.ch]
+	return v, info, nil
 }
 
 // vorbisOrder maps Vorbis's channel order to WAV's (front left, front
@@ -532,6 +596,23 @@ var vorbisOrder = map[int][]int{
 
 func (v *vorbisReader) Read(p []float32) (int, error) {
 	n, err := v.r.Read(p)
+	for n == 0 && err == io.EOF && v.next < len(v.starts) { // the next chained stream
+		rate, ch := v.r.SampleRate(), v.r.Channels()
+		nr, oerr := v.open(v.next)
+		v.next++
+		if oerr != nil {
+			return 0, fmt.Errorf("chained stream %d of %d can't be decoded: %v", v.next, len(v.starts), oerr)
+		}
+		if nr.SampleRate() != rate || nr.Channels() != ch {
+			return 0, fmt.Errorf("chained stream %d of %d has %s %s, the first %s %s; lens stops there",
+				v.next, len(v.starts), rateText(nr.SampleRate()), channelsText(nr.Channels()), rateText(rate), channelsText(ch))
+		}
+		v.r = nr
+		n, err = v.r.Read(p)
+	}
+	if err == io.EOF && n > 0 && v.next < len(v.starts) {
+		err = nil // the last samples of this stream; the next one follows
+	}
 	ch := v.r.Channels()
 	if order, ok := vorbisOrder[ch]; ok {
 		tmp := make([]float32, ch)
@@ -549,15 +630,15 @@ func (v *vorbisReader) Close() error { return v.f.Close() }
 
 // oggPages walks an Ogg file's pages, checking each one's checksum: how
 // many logical streams start in it, and what's wrong with it, if anything.
-func oggPages(path string) (int, string) {
+func oggPages(path string) ([]int64, string) {
 	f, err := os.Open(path)
 	if err != nil {
-		return 0, ""
+		return nil, ""
 	}
 	defer f.Close()
 	r := bufio.NewReaderSize(f, 1<<16)
 	var off int64
-	streams := 0
+	var starts []int64 // where each logical stream begins
 	ended := false
 	page := make([]byte, 27+255+255*255)
 	for {
@@ -566,14 +647,14 @@ func oggPages(path string) (int, string) {
 			break
 		}
 		if err != nil {
-			return streams, fmt.Sprintf("the file ends early: it stops inside an Ogg page at byte %s", count(int(off)))
+			return starts, fmt.Sprintf("the file ends early: it stops inside an Ogg page at byte %s", count(int(off)))
 		}
 		if string(page[:4]) != "OggS" {
-			return streams, fmt.Sprintf("the file is damaged: no Ogg page where one should start, at byte %s", count(int(off)))
+			return starts, fmt.Sprintf("the file is damaged: no Ogg page where one should start, at byte %s", count(int(off)))
 		}
 		segs := int(page[26])
 		if _, err := io.ReadFull(r, page[27:27+segs]); err != nil {
-			return streams, fmt.Sprintf("the file ends early: it stops inside an Ogg page at byte %s", count(int(off)))
+			return starts, fmt.Sprintf("the file ends early: it stops inside an Ogg page at byte %s", count(int(off)))
 		}
 		body := 0
 		for _, s := range page[27 : 27+segs] {
@@ -581,22 +662,22 @@ func oggPages(path string) (int, string) {
 		}
 		size := 27 + segs + body
 		if _, err := io.ReadFull(r, page[27+segs:size]); err != nil {
-			return streams, fmt.Sprintf("the file ends early: it stops inside an Ogg page at byte %s", count(int(off)))
+			return starts, fmt.Sprintf("the file ends early: it stops inside an Ogg page at byte %s", count(int(off)))
 		}
 		want := binary.LittleEndian.Uint32(page[22:26])
 		if oggCRC(page[:size]) != want {
-			return streams, fmt.Sprintf("the file is damaged: the Ogg page at byte %s fails its checksum", count(int(off)))
+			return starts, fmt.Sprintf("the file is damaged: the Ogg page at byte %s fails its checksum", count(int(off)))
 		}
 		if page[5]&2 != 0 {
-			streams++
+			starts = append(starts, off)
 		}
 		ended = page[5]&4 != 0
 		off += int64(size)
 	}
 	if !ended && off > 0 {
-		return streams, "the file may be cut short: its last Ogg page doesn't end the stream"
+		return starts, "the file may be cut short: its last Ogg page doesn't end the stream"
 	}
-	return streams, ""
+	return starts, ""
 }
 
 var oggTable = func() [256]uint32 {
@@ -696,14 +777,14 @@ func openFFmpeg(path string, kind fileKind, why error) (pcmReader, audioInfo, er
 	var p probe
 	if jerr := json.Unmarshal(js, &p); jerr != nil || len(p.Streams) == 0 {
 		if err != nil {
-			return nil, info, fmt.Errorf("ffprobe can't read it: %s", lastLine(stderr.String(), err))
+			return nil, info, fmt.Errorf("ffprobe can't read it: %s", strings.ReplaceAll(lastLine(stderr.String(), err), in, path))
 		}
 		if jerr != nil {
 			return nil, info, fmt.Errorf("ffprobe's answer isn't JSON: %v", jerr)
 		}
 	}
 	if err != nil { // it found the streams but stumbled: a damaged or cut file
-		info.warn = "ffprobe reports a problem: " + lastLine(stderr.String(), err)
+		info.warn = "ffprobe reports a problem: " + strings.ReplaceAll(lastLine(stderr.String(), err), in, path)
 	}
 	audio := -1
 	video := false
@@ -738,7 +819,6 @@ func openFFmpeg(path string, kind fileKind, why error) (pcmReader, audioInfo, er
 		}
 		info.lossy = false
 	}
-	info.bitrate, _ = strconv.Atoi(s.BitRate)
 	if s.CodecName == "flac" || s.CodecName == "alac" {
 		info.lossy = false
 	}
@@ -754,7 +834,10 @@ func openFFmpeg(path string, kind fileKind, why error) (pcmReader, audioInfo, er
 	if container == codec || container == "WMA" {
 		info.format = codec
 	}
-	cmd := exec.Command("ffmpeg", "-v", "error", "-nostdin", "-i", in, "-map", fmt.Sprintf("0:%d", audio),
+	// crccheck: FLAC's frame checksums; asetpts: the joins of chained files
+	// don't upset the raw output
+	cmd := exec.Command("ffmpeg", "-v", "error", "-nostdin", "-err_detect", "crccheck", "-i", in,
+		"-map", fmt.Sprintf("0:%d", audio), "-af", "asetpts=N/SR/TB",
 		"-f", "f32le", "-acodec", "pcm_f32le", "-")
 	cmd.Stderr = &stderr
 	stderr.Reset()

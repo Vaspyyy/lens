@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"io"
 	"math"
 	"math/bits"
@@ -173,6 +174,9 @@ func analyzeAudioFile(path string, kind fileKind, o options) (*soundFacts, error
 		s.warning = readErr.Error()
 	case closeErr != nil:
 		s.warning = closeErr.Error()
+	case info.expect > 0 && s.duration() < info.expect*0.99-0.01:
+		s.warning = fmt.Sprintf("the file ends early: its header promises %s of sound, the file holds %s",
+			secText(info.expect), secText(s.duration()))
 	}
 	return s, nil
 }
@@ -427,7 +431,8 @@ func channelWeights(ch int, mask uint32, layout string) []float64 {
 		}
 		return w
 	}
-	usual := map[int]uint32{1: 0x4, 2: 0x3, 3: 0x7, 4: 0x33, 5: 0x37, 6: 0x3f, 7: 0x70f, 8: 0x63f}
+	// what ffmpeg assumes for a count: 2.1, 4.0, 5.0(side), 5.1(side), 6.1, 7.1
+	usual := map[int]uint32{1: 0x4, 2: 0x3, 3: 0xb, 4: 0x107, 5: 0x607, 6: 0x60f, 7: 0x70f, 8: 0x63f}
 	if bits.OnesCount32(mask) != ch {
 		mask = usual[ch]
 	}

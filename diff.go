@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"image"
 	"io"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -310,16 +311,10 @@ func renderDiff(out io.Writer, d *diffResult, o options) {
 	} else {
 		fmt.Fprintf(w, "crop     %s for both (%s, %s of the image)\n", geom(c.union), pads, pct(area(c.union), total))
 	}
-	// the crops' names: before-crop.png, or before-before-crop.png when both
-	// files would write the same name
-	stems := [2]string{"", ""}
-	if sibling(a.path, "", ".png") == sibling(b.path, "", ".png") {
-		stems = [2]string{"-before", "-after"}
-	}
+	stems := cropStems(a.path, b.path, len(c.boxes), c.perSpot)
 	for i, box := range c.boxes {
-		suffix := "-crop"
+		suffix := cropSuffix(i, c.perSpot)
 		if c.perSpot {
-			suffix = fmt.Sprintf("-crop%d", i+1)
 			per := 3
 			if o.budget > 0 && cw.n+per > o.budget && i > 0 {
 				fmt.Fprintf(w, "  … %s (-b 0 shows them)\n", strings.Replace(plural(len(c.boxes)-i, "crop"), " ", " more ", 1))
@@ -331,6 +326,43 @@ func renderDiff(out io.Writer, d *diffResult, o options) {
 			fmt.Fprintf(w, "  magick %s -crop %s +repage %s\n", shellQuote(f.path), geom(box), shellQuote(sibling(f.path, stems[j]+suffix, ".png")))
 		}
 	}
+}
+
+func cropSuffix(i int, perSpot bool) string {
+	if perSpot {
+		return fmt.Sprintf("-crop%d", i+1)
+	}
+	return "-crop"
+}
+
+// cropStems picks what goes before "-crop" in the crops' names, so no two
+// crops share a file and none overwrites an input: before-crop.png, else
+// shot-before-crop.png (shot.png and shot.jpg), else with -lens in it.
+func cropStems(a, b string, n int, perSpot bool) [2]string {
+	key := func(p string) string {
+		if abs, err := filepath.Abs(p); err == nil {
+			return abs
+		}
+		return filepath.Clean(p)
+	}
+	for _, st := range [][2]string{{"", ""}, {"-before", "-after"}, {"-lens-before", "-lens-after"}} {
+		seen := map[string]bool{key(a): true, key(b): true}
+		ok := true
+		for i := 0; i < n && ok; i++ {
+			for j, p := range []string{a, b} {
+				k := key(sibling(p, st[j]+cropSuffix(i, perSpot), ".png"))
+				if seen[k] {
+					ok = false
+					break
+				}
+				seen[k] = true
+			}
+		}
+		if ok {
+			return st
+		}
+	}
+	return [2]string{"-lens-before", "-lens-after"}
 }
 
 // countWriter counts the lines written through it.

@@ -56,8 +56,6 @@ func soundHeader(s *soundFacts) string {
 	size := sizeText(s.info.size)
 	switch {
 	case !s.info.lossy:
-	case s.info.bitrate > 0:
-		size += fmt.Sprintf(" (%.0f kb/s)", float64(s.info.bitrate)/1000)
 	case s.duration() > 0.5:
 		bytes := s.info.size
 		if s.info.audio > 0 { // not the cover art in the tag
