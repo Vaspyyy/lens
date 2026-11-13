@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"image"
 	"io"
-	"os"
 	"sort"
 	"strings"
 )
@@ -37,12 +36,14 @@ type diffResult struct {
 func runDiff(out io.Writer, o options) int {
 	var fs [2]*imageFacts
 	for i, p := range o.files {
-		k := sniffFile(p)
+		k, err := sniffFile(p)
+		if err != nil {
+			fmt.Fprintf(out, "lens: %v\n", err)
+			return 2
+		}
 		if !k.isImage() {
 			if k.isAudio() {
 				fmt.Fprintf(out, "lens: %s is a sound; lens diff compares images (lens A B lists two sounds side by side)\n", p)
-			} else if k == kOther && !exists(p) {
-				fmt.Fprintf(out, "lens: %s: no such file\n", p)
 			} else {
 				fmt.Fprintf(out, "lens: %s: %s\n", p, k.notMedia())
 			}
@@ -57,6 +58,9 @@ func runDiff(out io.Writer, o options) int {
 	}
 	d := compare(fs[0], fs[1], o)
 	renderDiff(out, d, o)
+	if o.picture != "" && d.changed == 0 {
+		fmt.Fprintf(out, "picture  not written: nothing changed\n")
+	}
 	if o.picture != "" && d.changed > 0 {
 		if err := writeDiffPicture(o.picture, d, cropFor(d, o)); err != nil {
 			fmt.Fprintf(out, "lens: %v\n", err)
@@ -190,6 +194,7 @@ func abs(x int) int {
 type crop struct {
 	boxes   []image.Rectangle
 	perSpot bool
+	spots   [][]int         // the spot numbers in each crop
 	union   image.Rectangle // the one box around everything, padded
 }
 
@@ -198,21 +203,27 @@ func padBox(r image.Rectangle, pad, w, h int) image.Rectangle {
 }
 
 // cropFor picks one crop around all changes, or one per spot when one box
-// would mostly show what didn't change.
+// would mostly show what didn't change. Crops keep the spots' order, so
+// crop 1 holds spot 1; every spot is in a crop, listed or not.
 func cropFor(d *diffResult, o options) crop {
 	c := crop{union: padBox(d.all, o.pad, d.w, d.h)}
-	var boxes []image.Rectangle
-	for _, s := range d.spots { // every spot, listed or not, is in a crop
-		boxes = append(boxes, padBox(s.box, o.pad, d.w, d.h))
+	type group struct {
+		box   image.Rectangle
+		spots []int
 	}
-	// padded boxes that overlap become one
+	var gs []group
+	for i, s := range d.spots {
+		gs = append(gs, group{padBox(s.box, o.pad, d.w, d.h), []int{i + 1}})
+	}
+	// padded boxes that overlap become one, under the first one's number
 	for merged := true; merged; {
 		merged = false
-		for i := 0; i < len(boxes) && !merged; i++ {
-			for j := i + 1; j < len(boxes); j++ {
-				if boxes[i].Overlaps(boxes[j]) {
-					boxes[i] = boxes[i].Union(boxes[j])
-					boxes = append(boxes[:j], boxes[j+1:]...)
+		for i := 0; i < len(gs) && !merged; i++ {
+			for j := i + 1; j < len(gs); j++ {
+				if gs[i].box.Overlaps(gs[j].box) {
+					gs[i].box = gs[i].box.Union(gs[j].box)
+					gs[i].spots = append(gs[i].spots, gs[j].spots...)
+					gs = append(gs[:j], gs[j+1:]...)
 					merged = true
 					break
 				}
@@ -220,21 +231,25 @@ func cropFor(d *diffResult, o options) crop {
 		}
 	}
 	sum := 0
-	for _, b := range boxes {
-		sum += area(b)
+	for _, g := range gs {
+		sum += area(g.box)
 	}
-	if len(boxes) > 1 && len(boxes) <= maxShow && area(c.union) > 2*sum && area(c.union)*4 > d.w*d.h {
-		sort.Slice(boxes, func(i, j int) bool {
-			return boxes[i].Min.Y < boxes[j].Min.Y || boxes[i].Min.Y == boxes[j].Min.Y && boxes[i].Min.X < boxes[j].Min.X
-		})
-		c.boxes, c.perSpot = boxes, true
+	if len(gs) > 1 && len(gs) <= maxShow && area(c.union) > 2*sum && area(c.union)*4 > d.w*d.h {
+		for _, g := range gs {
+			sort.Ints(g.spots)
+			c.boxes = append(c.boxes, g.box)
+			c.spots = append(c.spots, g.spots)
+		}
+		c.perSpot = true
 		return c
 	}
 	c.boxes = []image.Rectangle{c.union}
 	return c
 }
 
-func renderDiff(w io.Writer, d *diffResult, o options) {
+func renderDiff(out io.Writer, d *diffResult, o options) {
+	cw := &countWriter{w: out}
+	w := io.Writer(cw)
 	a, b := d.a, d.b
 	size := fmt.Sprintf("%dx%d both", a.w, a.h)
 	if a.w != b.w || a.h != b.h {
@@ -242,14 +257,17 @@ func renderDiff(w io.Writer, d *diffResult, o options) {
 	}
 	fmt.Fprintf(w, "lens: diff %s %s  %s\n", a.path, b.path, size)
 	if d.changed == 0 {
+		same := "every pixel is the same"
 		switch {
 		case d.sameBytes:
-			fmt.Fprintln(w, "same     the files are identical, byte for byte")
+			same = "the files are identical, byte for byte"
 		case d.fuzz > 0:
-			fmt.Fprintf(w, "same     no pixel differs by more than %s%%\n", fuzzText(d.fuzz))
-		default:
-			fmt.Fprintln(w, "same     every pixel is the same")
+			same = fmt.Sprintf("no pixel differs by more than %s%%", fuzzText(d.fuzz))
 		}
+		if a.w != b.w || a.h != b.h {
+			same = fmt.Sprintf("in the shared %dx%d area, %s; the sizes differ", d.w, d.h, same)
+		}
+		fmt.Fprintln(w, "same     "+same)
 		return
 	}
 	total := d.w * d.h
@@ -292,22 +310,52 @@ func renderDiff(w io.Writer, d *diffResult, o options) {
 	} else {
 		fmt.Fprintf(w, "crop     %s for both (%s, %s of the image)\n", geom(c.union), pads, pct(area(c.union), total))
 	}
+	// the crops' names: before-crop.png, or before-before-crop.png when both
+	// files would write the same name
+	stems := [2]string{"", ""}
+	if sibling(a.path, "", ".png") == sibling(b.path, "", ".png") {
+		stems = [2]string{"-before", "-after"}
+	}
 	for i, box := range c.boxes {
 		suffix := "-crop"
 		if c.perSpot {
 			suffix = fmt.Sprintf("-crop%d", i+1)
+			per := 3
+			if o.budget > 0 && cw.n+per > o.budget && i > 0 {
+				fmt.Fprintf(w, "  … %s (-b 0 shows them)\n", strings.Replace(plural(len(c.boxes)-i, "crop"), " ", " more ", 1))
+				break
+			}
+			fmt.Fprintf(w, "  %s:\n", spotList(c.spots[i]))
 		}
-		for _, f := range []*imageFacts{a, b} {
-			fmt.Fprintf(w, "  magick %s -crop %s +repage %s\n", shellQuote(f.path), geom(box), shellQuote(sibling(f.path, suffix, ".png")))
+		for j, f := range []*imageFacts{a, b} {
+			fmt.Fprintf(w, "  magick %s -crop %s +repage %s\n", shellQuote(f.path), geom(box), shellQuote(sibling(f.path, stems[j]+suffix, ".png")))
 		}
 	}
 }
 
-func fuzzText(f float64) string {
-	return strings.TrimSuffix(strings.TrimRight(fmt.Sprintf("%.2f", f), "0"), ".")
+// countWriter counts the lines written through it.
+type countWriter struct {
+	w io.Writer
+	n int
 }
 
-func exists(p string) bool {
-	_, err := os.Stat(p)
-	return err == nil
+func (c *countWriter) Write(p []byte) (int, error) {
+	c.n += bytes.Count(p, []byte("\n"))
+	return c.w.Write(p)
+}
+
+// spotList is "spot 2" or "spots 2 and 5" or "spots 1, 3 and 4".
+func spotList(ns []int) string {
+	if len(ns) == 1 {
+		return fmt.Sprintf("spot %d", ns[0])
+	}
+	var s []string
+	for _, n := range ns[:len(ns)-1] {
+		s = append(s, fmt.Sprint(n))
+	}
+	return fmt.Sprintf("spots %s and %d", strings.Join(s, ", "), ns[len(ns)-1])
+}
+
+func fuzzText(f float64) string {
+	return strings.TrimSuffix(strings.TrimRight(fmt.Sprintf("%.2f", f), "0"), ".")
 }

@@ -16,7 +16,7 @@ func analyzeImage(f *imageFacts) {
 		return
 	}
 	var hist [1 << 15]int32
-	var sums [1 << 15][3]uint32
+	var sums [1 << 15][3]uint64      // uint32 wraps past 16.8M pixels of one bin
 	seen := make([]uint64, 1<<24/64) // every 24-bit color seen, a bit each
 	any0 := image.Rectangle{Min: image.Point{w, h}}
 	strong := any0
@@ -42,9 +42,9 @@ func analyzeImage(f *imageFacts) {
 			k := int(r>>3)<<10 | int(g>>3)<<5 | int(b>>3)
 			hist[k]++
 			s := &sums[k]
-			s[0] += uint32(r)
-			s[1] += uint32(g)
-			s[2] += uint32(b)
+			s[0] += uint64(r)
+			s[1] += uint64(g)
+			s[2] += uint64(b)
 			c := uint32(r)<<16 | uint32(g)<<8 | uint32(b)
 			seen[c>>6] |= 1 << (c & 63)
 		}
@@ -54,6 +54,26 @@ func analyzeImage(f *imageFacts) {
 	}
 	corner := func(x, y int) bool { return m.Pix[y*m.Stride+4*x+3] == 0 }
 	f.cornersClear = corner(0, 0) && corner(w-1, 0) && corner(0, h-1) && corner(w-1, h-1)
+	n, clearN := 0, 0
+	edge := func(x, y int) {
+		n++
+		if corner(x, y) {
+			clearN++
+		}
+	}
+	for x := 0; x < w; x++ {
+		edge(x, 0)
+		if h > 1 {
+			edge(x, h-1)
+		}
+	}
+	for y := 1; y < h-1; y++ {
+		edge(0, y)
+		if w > 1 {
+			edge(w-1, y)
+		}
+	}
+	f.borderClear = float64(clearN) / float64(n)
 
 	f.colors = mainColors(&hist, &sums, f.visible)
 	full := image.Rect(0, 0, w, h)
@@ -137,7 +157,7 @@ func absDiff(a, b uint8) int {
 
 // mainColors merges the histogram's bins into colors, largest first, the
 // ones with at least 1% of the visible pixels.
-func mainColors(hist *[1 << 15]int32, sums *[1 << 15][3]uint32, visible int) []colorShare {
+func mainColors(hist *[1 << 15]int32, sums *[1 << 15][3]uint64, visible int) []colorShare {
 	if visible == 0 {
 		return nil
 	}
@@ -174,9 +194,9 @@ func mainColors(hist *[1 << 15]int32, sums *[1 << 15][3]uint32, visible int) []c
 			groups = append(groups, to)
 		}
 		to.n += b.n
-		to.sr += uint64(s[0])
-		to.sg += uint64(s[1])
-		to.sb += uint64(s[2])
+		to.sr += s[0]
+		to.sg += s[1]
+		to.sb += s[2]
 	}
 	sort.SliceStable(groups, func(i, j int) bool { return groups[i].n > groups[j].n })
 	var out []colorShare

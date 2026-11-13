@@ -45,7 +45,7 @@ lens diff [flags] BEFORE AFTER  what changed, and one crop for both
 
 ```
 lens: icon.png  PNG, 1024x1024 square, RGBA 8-bit, 412 KB
-alpha    real transparency: 38.2% clear, 4.1% partly (soft edges), corners clear
+alpha    38% clear, 4.1% partly (soft edges); the border is clear: a real transparent background
 drawn    880x880+72+72, 74% of the image (the rest is clear)
 colors   #1b1530 61%, #2a2350 18%, #8f7cff 7%, #e8e4ff 3%; 2,914 distinct
 next: magick icon.png -crop 880x880+72+72 +repage icon-trim.png   cut to the drawn area
@@ -58,7 +58,8 @@ next: magick icon.png -crop 880x880+72+72 +repage icon-trim.png   cut to the dra
   GIF and APNG frames and duration; JPEG baseline or progressive.
 - **alpha:** no alpha channel; an alpha channel with every pixel opaque; or
   the share of clear (alpha 0) and partly transparent pixels, and whether
-  the corners are clear. Partly transparent pixels are where halos and soft
+  the border is clear (90% of it: a real transparent background; only the
+  corners: rounded corners). Partly transparent pixels are where halos and soft
   edges live, so their share is always given.
 - **background:** a plain border color, or a checkerboard painted into the
   pixels (two grays alternating in squares), which is fake transparency.
@@ -68,8 +69,8 @@ next: magick icon.png -crop 880x880+72+72 +repage icon-trim.png   cut to the dra
   separately, since generators leave such noise. Without transparency it is
   the pixels unlike the border color (within a small tolerance for JPEG).
 - **colors:** the main colors of the visible pixels with their share,
-  merged when close, and the number of distinct colors. One color
-  everywhere is called blank, a fully clear image empty.
+  merged when close, and the number of distinct colors. One color in every
+  pixel, nothing clear, is called blank; a fully clear image empty.
 
 ### Several files or a folder
 
@@ -91,10 +92,11 @@ crop     one per spot, since one crop for both would cover 89% of the image
 ```
 
 - A pixel changed when a channel differs by more than the fuzz (`--fuzz P`,
-  percent; 0 for lossless pairs, 3 when either is a JPEG). Fully clear
+  percent; 0 for lossless pairs, 3 when either is lossy). Fully clear
   pixels are equal whatever their color.
 - Spots: changed pixels grouped on an 8-pixel grid, with spots closer than
-  32 pixels merged, each with its tight box; largest first, up to 6 listed.
+  about 32 pixels (4 cells) merged, each with its tight box; largest first,
+  up to 6 listed, and every spot inside a suggested crop.
 - The crop: the box around all changes plus `--pad` pixels (16), clamped to
   the image. When there are several spots and one box would mostly show
   unchanged pixels, one crop per spot. The same geometry is printed for

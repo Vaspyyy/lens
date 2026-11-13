@@ -3,11 +3,19 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"hash/crc32"
 	"image"
+	"image/color"
+	"image/jpeg"
+	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/image/bmp"
+	"golang.org/x/image/tiff"
 )
 
 // Regression tests for findings of the reviews.
@@ -85,7 +93,8 @@ func TestReviewCropCoversEverySpot(t *testing.T) {
 
 func mustLoad(t *testing.T, p string) *imageFacts {
 	t.Helper()
-	f, err := loadImage(p, sniffFile(p))
+	k, _ := sniffFile(p)
+	f, err := loadImage(p, k)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,4 +115,411 @@ func TestReviewNaNFlags(t *testing.T) {
 		}
 	}
 	_ = image.Point{}
+}
+
+// Opus 5.5: color sums don't wrap on big images.
+func TestReviewBigWhiteImage(t *testing.T) {
+	if testing.Short() {
+		t.Skip("a 17-megapixel image")
+	}
+	f := &imageFacts{w: 4200, h: 4200, img: canvas(4200, 4200, white)}
+	analyzeImage(f)
+	if got := colorsText(f); !strings.Contains(got, "#ffffff (blank)") {
+		t.Errorf("colors: %s", got)
+	}
+}
+
+// Opus 5.5: an RGB BMP or TIFF has no alpha channel.
+func TestReviewBMPAndTIFFAlpha(t *testing.T) {
+	dir := t.TempDir()
+	m := opaqueRGB(canvas(16, 8, violet))
+	bp := filepath.Join(dir, "rgb.bmp")
+	f, _ := os.Create(bp)
+	bmp.Encode(f, m)
+	f.Close()
+	out, _ := lensRun(t, bp)
+	mustContain(t, out, "24 bits a pixel", "none: no alpha channel")
+	tp := filepath.Join(dir, "gray.tif") // Go writes RGB TIFFs with alpha; gray has none
+	g := image.NewGray(image.Rect(0, 0, 16, 8))
+	f, _ = os.Create(tp)
+	tiff.Encode(f, g, nil)
+	f.Close()
+	out, _ = lensRun(t, tp)
+	mustContain(t, out, "TIFF, 16x8 landscape 2:1, gray 8-bit", "none: no alpha channel")
+	// with real alpha, the TIFF says so
+	ta := filepath.Join(dir, "rgba.tif")
+	c := canvas(16, 8, clear)
+	rect(c, image.Rect(2, 2, 6, 6), violet)
+	f, _ = os.Create(ta)
+	tiff.Encode(f, c, nil)
+	f.Close()
+	out, _ = lensRun(t, ta)
+	mustContain(t, out, "RGBA 8-bit", "real transparent background")
+}
+
+// Opus 5.5: 8-bit PCM's positive full scale is 127/128.
+func TestReviewEightBitClipping(t *testing.T) {
+	x := sine(8000, 200, 0.5, 6)
+	for i, v := range x {
+		x[i] = max(v, -0.5) // clipped on the positive side only
+	}
+	p := filepath.Join(t.TempDir(), "pos8.wav")
+	writeWAV(t, p, wavSpec{rate: 8000, bits: 8}, x)
+	out, _ := lensRun(t, p)
+	mustContain(t, out, "clipped: ", "in 100 runs")
+}
+
+// Opus 5.5: a big ID3 tag (cover art) doesn't hide the first frame, and
+// the bitrate leaves the tag out.
+func TestReviewBigID3Tag(t *testing.T) {
+	raw, err := os.ReadFile("testdata/mono.mp3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const pad = 200000
+	tag := []byte{'I', 'D', '3', 4, 0, 0, byte(pad >> 21 & 0x7f), byte(pad >> 14 & 0x7f), byte(pad >> 7 & 0x7f), byte(pad & 0x7f)}
+	tag = append(tag, make([]byte, pad)...)
+	start := id3Size(raw)
+	p := filepath.Join(t.TempDir(), "art.mp3")
+	os.WriteFile(p, append(tag, raw[start:]...), 0o644)
+	out, code := lensRun(t, p)
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, out)
+	}
+	mustContain(t, out, "MP3, 490 ms, 44.1 kHz mono", "40 ms at the start")
+	mustLack(t, out, "kb/s)") // under half a second: no bitrate
+	// a FLAC with an ID3 tag in front is a FLAC
+	fl, _ := os.ReadFile("testdata/tone.flac")
+	fp := filepath.Join(t.TempDir(), "tagged.flac")
+	os.WriteFile(fp, append(append([]byte(nil), tag...), fl...), 0o644)
+	if k, _ := sniffFile(fp); k != kFLAC {
+		t.Errorf("FLAC behind an ID3 tag is %v", k)
+	}
+}
+
+// Opus 5.5: damaged or cut Ogg and FLAC files say so.
+func TestReviewDamagedOgg(t *testing.T) {
+	raw, err := os.ReadFile("testdata/tone.ogg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	bad := append([]byte(nil), raw...)
+	for i := len(bad) - 200; i < len(bad)-150; i++ {
+		bad[i] ^= 0x5a
+	}
+	bp := filepath.Join(dir, "bad.ogg")
+	os.WriteFile(bp, bad, 0o644)
+	out, code := lensRun(t, bp)
+	if code != 2 || !strings.Contains(out, "fails its checksum") {
+		t.Errorf("damaged Ogg: exit %d\n%s", code, out)
+	}
+	if oggCRC(raw[:58]) == 0 { // a sanity check that the first page is real
+		t.Error("no checksum")
+	}
+	if _, problem := oggPages("testdata/tone.ogg"); problem != "" {
+		t.Errorf("a good Ogg: %s", problem)
+	}
+}
+
+func TestReviewChainedOggAndFLACDamage(t *testing.T) {
+	needFFmpeg(t)
+	raw, _ := os.ReadFile("testdata/tone.ogg")
+	dir := t.TempDir()
+	chain := filepath.Join(dir, "chain.ogg")
+	os.WriteFile(chain, append(append([]byte(nil), raw...), raw...), 0o644)
+	out, _ := lensRun(t, chain)
+	near64(t, "chained length", field(t, out, `Ogg Vorbis, (\d+) ms`), 985, 25)
+	fl, _ := os.ReadFile("testdata/tone.flac")
+	for _, c := range []struct{ name, codec, want string }{
+		{"long.flac", "flac", "warning   ffmpeg reports a problem: Decoding error"},
+		{"long.ogg", "libvorbis", "warning   the file ends early: it stops inside an Ogg page"},
+	} {
+		full := filepath.Join(dir, c.name)
+		if err := exec.Command("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=3", "-c:a", c.codec, full).Run(); err != nil {
+			t.Skip("ffmpeg can't make the file: ", err)
+		}
+		raw, _ := os.ReadFile(full)
+		cut := filepath.Join(dir, "cut-"+c.name)
+		os.WriteFile(cut, raw[:len(raw)*2/3], 0o644)
+		out, code := lensRun(t, cut)
+		if code != 2 || !strings.Contains(out, c.want) {
+			t.Errorf("cut %s: exit %d\n%s", c.name, code, out)
+		}
+	}
+	// a colon in the name isn't a protocol
+	colon := filepath.Join(dir, "12:30 take.flac")
+	os.WriteFile(colon, fl, 0o644)
+	out, code := lensRun(t, colon)
+	if code != 0 {
+		t.Errorf("colon name: exit %d\n%s", code, out)
+	}
+}
+
+func TestReviewFFmpegMadeFormats(t *testing.T) {
+	needFFmpeg(t)
+	dir := t.TempDir()
+	alaw := filepath.Join(dir, "alaw.wav")
+	m25 := filepath.Join(dir, "m25.mp3")
+	for _, c := range [][]string{
+		{"-f", "lavfi", "-i", "sine=frequency=440:duration=0.5", "-c:a", "pcm_alaw", alaw},
+		{"-f", "lavfi", "-i", "sine=frequency=440:duration=0.5:sample_rate=8000", "-c:a", "libmp3lame", m25},
+	} {
+		if err := exec.Command("ffmpeg", append([]string{"-v", "error", "-y"}, c...)...).Run(); err != nil {
+			t.Skip("ffmpeg can't make the file: ", err)
+		}
+	}
+	out, _ := lensRun(t, alaw)
+	mustContain(t, out, "WAV A-law, 500 ms")
+	out, code := lensRun(t, m25)
+	if code != 0 {
+		t.Fatalf("MPEG 2.5: exit %d\n%s", code, out)
+	}
+	mustContain(t, out, "MP3", "8 kHz mono")
+}
+
+// Opus 5.5: frames after the hop grew count for the stretch they stand for.
+func TestReviewToneWeighting(t *testing.T) {
+	const r = 16000
+	a := sine(r, 440, 20, -12)
+	b := sine(r, 6000, 60, -12)
+	dir := t.TempDir()
+	p1, p2 := filepath.Join(dir, "1.wav"), filepath.Join(dir, "2.wav")
+	writeWAV(t, p1, wavSpec{rate: r}, cat(a, b))
+	writeWAV(t, p2, wavSpec{rate: r}, cat(b, a))
+	share := `above (\d+)%`
+	h1 := field(t, mustOut(t, p1), share)
+	h2 := field(t, mustOut(t, p2), share)
+	near64(t, "high share, tone first", h1, 75, 3)
+	near64(t, "high share, tone last", h2, 75, 3)
+}
+
+func mustOut(t *testing.T, args ...string) string {
+	t.Helper()
+	out, code := lensRun(t, args...)
+	if code != 0 {
+		t.Fatalf("exit %d\n%s", code, out)
+	}
+	return out
+}
+
+// Opus 5.5: a click shorter than one FFT frame is analyzed in the middle
+// of the window, not at its tapered end.
+func TestReviewTinyClick(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "click.wav")
+	writeWAV(t, p, wavSpec{rate: 44100}, sine(44100, 2000, 0.005, -6))
+	out := mustOut(t, p)
+	mustLack(t, out, "noise-like")
+	one := filepath.Join(t.TempDir(), "one.wav")
+	writeWAV(t, one, wavSpec{rate: 44100}, []float64{0.5})
+	out = mustOut(t, one)
+	mustLack(t, out, "energy under 250 Hz 0%, 250 Hz-4 kHz 0%")
+}
+
+// Opus 5.5: BS.1770 isn't defined at very low sample rates.
+func TestReviewLowRateLoudness(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "low.wav")
+	writeWAV(t, p, wavSpec{rate: 2000}, sine(2000, 100, 3, -18))
+	out := mustOut(t, p)
+	mustContain(t, out, "loudness not measured")
+}
+
+// Opus 5.5: small output slips.
+func TestReviewOutputSlips(t *testing.T) {
+	if got := durText(secDur(119.97)); got != "2:00.0" {
+		t.Errorf("durText(119.97 s) = %q", got)
+	}
+	if got := durText(secDur(3599.97)); got != "1:00:00" {
+		t.Errorf("durText(3599.97 s) = %q", got)
+	}
+	if k := sniff([]byte("\x00\x00\x00\x1cftypavif"), "x.avif"); k != kHEIF {
+		t.Errorf("AVIF is %v", k)
+	}
+	dir := t.TempDir()
+	a := canvas(1000, 1000, white)
+	b := canvas(1000, 1000, white)
+	for i := 0; i < 5; i++ {
+		rect(b, image.Rect(50+i*190, 50+i*190, 60+i*190, 60+i*190), black)
+	}
+	pa := savePNG(t, dir, "shot.png", opaqueRGB(a))
+	sub := filepath.Join(dir, "x")
+	os.Mkdir(sub, 0o755)
+	f, _ := os.Create(filepath.Join(dir, "shot.jpg"))
+	jpeg.Encode(f, b, &jpeg.Options{Quality: 100})
+	f.Close()
+	out, _ := lensRun(t, "diff", pa, filepath.Join(dir, "shot.jpg"), "--fuzz", "20")
+	mustContain(t, out, "shot-before-crop1.png", "shot-after-crop1.png", "  spot 1:")
+	out, _ = lensRun(t, "diff", pa, filepath.Join(dir, "shot.jpg"), "--fuzz", "20", "-b", "12")
+	mustContain(t, out, "more crops (-b 0 shows them)")
+	if n := strings.Count(out, "\n"); n > 13 {
+		t.Errorf("%d lines for -b 12:\n%s", n, out)
+	}
+}
+
+// Opus 5.5: an image too big to decode is refused before it eats the memory.
+func TestReviewHugeImageRefused(t *testing.T) {
+	var ihdr bytes.Buffer
+	binary.Write(&ihdr, binary.BigEndian, uint32(20000))
+	binary.Write(&ihdr, binary.BigEndian, uint32(20000))
+	ihdr.Write([]byte{8, 6, 0, 0, 0})
+	var out bytes.Buffer
+	out.WriteString("\x89PNG\r\n\x1a\n")
+	binary.Write(&out, binary.BigEndian, uint32(13))
+	c := crc32.NewIEEE()
+	c.Write([]byte("IHDR"))
+	c.Write(ihdr.Bytes())
+	out.WriteString("IHDR")
+	out.Write(ihdr.Bytes())
+	binary.Write(&out, binary.BigEndian, c.Sum32())
+	p := filepath.Join(t.TempDir(), "huge.png")
+	os.WriteFile(p, out.Bytes(), 0o644)
+	got, code := lensRun(t, p)
+	if code != 2 || !strings.Contains(got, "lens doesn't decode images this big") {
+		t.Errorf("exit %d: %s", code, got)
+	}
+}
+
+// Sonnet 5.5: MPEG-2 MP3s go through ffmpeg, which decodes them right.
+func TestReviewMPEG2MP3(t *testing.T) {
+	needFFmpeg(t)
+	p := filepath.Join(t.TempDir(), "q.mp3")
+	if err := exec.Command("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=1:sample_rate=22050",
+		"-af", "volume=-10dB", "-ac", "1", "-c:a", "libmp3lame", "-b:a", "32k", p).Run(); err != nil {
+		t.Skip("ffmpeg can't make the file: ", err)
+	}
+	out := mustOut(t, p)
+	near64(t, "peak", field(t, out, `peak (-?[\d.]+) dBFS`), -28.4, 1)
+	mustContain(t, out, "pitched, strongest at 440 Hz")
+}
+
+// Sonnet 5.5: absurd header sizes are refused, not allocated.
+func TestReviewAbsurdWAVHeaders(t *testing.T) {
+	dir := t.TempDir()
+	var b bytes.Buffer
+	b.WriteString("RIFF\x00\x00\x00\x00WAVEfmt ")
+	binary.Write(&b, binary.LittleEndian, uint32(0xfffffff0))
+	b.Write(make([]byte, 32))
+	p := filepath.Join(dir, "hugefmt.wav")
+	os.WriteFile(p, b.Bytes(), 0o644)
+	out, code := lensRun(t, p)
+	if code != 2 || !strings.Contains(out, "broken fmt chunk") {
+		t.Errorf("huge fmt: exit %d %s", code, out)
+	}
+	many := filepath.Join(dir, "many.wav")
+	chans := make([][]float64, 65)
+	for i := range chans {
+		chans[i] = []float64{0, 0.1}
+	}
+	writeWAV(t, many, wavSpec{rate: 8000}, chans...)
+	out, code = lensRun(t, many)
+	if code != 2 || !strings.Contains(out, "65 channels") {
+		t.Errorf("65 channels: exit %d %s", code, out)
+	}
+}
+
+// Sonnet 5.5: a one-color shape on a clear background isn't blank, and four
+// clear corners aren't a transparent background.
+func TestReviewBlankAndCorners(t *testing.T) {
+	dir := t.TempDir()
+	m := canvas(100, 100, clear)
+	rect(m, image.Rect(20, 20, 80, 80), color.NRGBA{255, 0, 0, 255})
+	out, _ := lensRun(t, savePNG(t, dir, "shape.png", m))
+	mustContain(t, out, "one: every visible pixel is #ff0000")
+	mustLack(t, out, "blank")
+	c := canvas(100, 100, color.NRGBA{0, 0, 255, 255})
+	for _, p := range [][2]int{{0, 0}, {99, 0}, {0, 99}, {99, 99}} {
+		c.SetNRGBA(p[0], p[1], clear)
+	}
+	out, _ = lensRun(t, savePNG(t, dir, "corners.png", c))
+	mustContain(t, out, "only the corners are clear (rounded corners?)")
+	mustLack(t, out, "real transparent background")
+	if got := pct(996, 1000); got != "99.6%" {
+		t.Errorf("pct(996, 1000) = %q", got)
+	}
+}
+
+// Sonnet 5.5: samples that aren't numbers are counted, not let loose.
+func TestReviewNaNSamples(t *testing.T) {
+	x := make([]float64, 400)
+	for i := range x {
+		x[i] = []float64{0.5, math.NaN(), 0.25, math.Inf(1)}[i%4]
+	}
+	p := filepath.Join(t.TempDir(), "nan.wav")
+	writeWAV(t, p, wavSpec{rate: 8000, bits: 32, float: true}, x)
+	out := mustOut(t, p)
+	mustContain(t, out, "200 samples weren't numbers (NaN or infinite), counted as 0", "peak -6.0 dBFS")
+	mustLack(t, out, "NaN dBFS", "all of it")
+}
+
+// Sonnet 5.5: channels in opposite phase still have a tone and a spectrum.
+func TestReviewOppositePhaseTone(t *testing.T) {
+	a := sine(16000, 440, 1, -12)
+	neg := make([]float64, len(a))
+	for i, v := range a {
+		neg[i] = -v
+	}
+	p := filepath.Join(t.TempDir(), "anti.wav")
+	writeWAV(t, p, wavSpec{rate: 16000}, a, neg)
+	out := mustOut(t, p)
+	mustContain(t, out, "opposite phase", "pitched, strongest at 440 Hz (A4)", "█")
+}
+
+// Sonnet 5.5: loudness weights follow the speaker layout.
+func TestReviewChannelWeights(t *testing.T) {
+	got := channelWeights(8, 0)
+	want := []float64{1, 1, 1, 0, 1.41, 1.41, 1.41, 1.41}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("7.1 weights %v, want %v", got, want)
+		}
+	}
+	if w := channelWeights(6, 0x60f); w[3] != 0 || w[4] != 1.41 { // 5.1 with side channels
+		t.Errorf("5.1(side) weights %v", w)
+	}
+	// a tone in the LFE alone has no loudness
+	const r = 8000
+	chans := make([][]float64, 8)
+	for i := range chans {
+		chans[i] = silence(r, 1)
+	}
+	chans[3] = sine(r, 60, 1, -6)
+	p := filepath.Join(t.TempDir(), "lfe.wav")
+	writeWAV(t, p, wavSpec{rate: r}, chans...)
+	out, _ := lensRun(t, p)
+	mustContain(t, out, "loudness: silent")
+}
+
+// Sonnet 5.5: errors say what's wrong, and nothing to show is a failure.
+func TestReviewErrorWords(t *testing.T) {
+	dir := t.TempDir()
+	empty := filepath.Join(dir, "empty")
+	os.Mkdir(empty, 0o755)
+	if _, code := lensRun(t, empty); code != 2 {
+		t.Errorf("an empty folder exits %d", code)
+	}
+	pa := savePNG(t, dir, "a.png", opaqueRGB(canvas(10, 10, white)))
+	out, code := lensRun(t, "diff", empty, pa)
+	if code != 2 || !strings.Contains(out, "is a folder") {
+		t.Errorf("diff with a folder: %d %s", code, out)
+	}
+	pb := savePNG(t, dir, "b.png", opaqueRGB(canvas(10, 5, white)))
+	pic := filepath.Join(dir, "d.png")
+	out, _ = lensRun(t, "diff", pa, pb, "-o", pic)
+	mustContain(t, out, "in the shared 10x5 area, every pixel is the same; the sizes differ", "picture  not written: nothing changed")
+	if os.Getuid() != 0 {
+		locked := savePNG(t, dir, "locked.png", opaqueRGB(canvas(4, 4, white)))
+		os.Chmod(locked, 0)
+		out, code = lensRun(t, locked)
+		if code != 2 || !strings.Contains(out, "permission denied") {
+			t.Errorf("unreadable: %d %s", code, out)
+		}
+	}
+	for s, want := range map[float64]string{0.9996: "1.00 s", 59.97: "1:00.0", 9.997: "10.0 s"} {
+		if got := secText(s); got != want {
+			t.Errorf("secText(%v) = %q, want %q", s, got, want)
+		}
+	}
+	if got := dbText(32767.0 / 32768); got != "0.0 dBFS" {
+		t.Errorf("dbText(full scale) = %q", got)
+	}
 }

@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -29,6 +31,7 @@ const (
 	kAudioFF fileKind = "audio" // another audio format: ffmpeg
 	kMedia   fileKind = "media" // MP4, Matroska, WebM: audio if it has no video
 	kSVG     fileKind = "SVG"
+	kHEIF    fileKind = "HEIF" // AVIF, HEIC
 	kVideo   fileKind = "video"
 	kEmpty   fileKind = "empty"
 	kOther   fileKind = "other"
@@ -53,6 +56,8 @@ func (k fileKind) isAudio() bool {
 // notMedia says why a file isn't shown.
 func (k fileKind) notMedia() string {
 	switch k {
+	case kHEIF:
+		return "an AVIF or HEIC image, which lens can't decode (magick FILE out.png converts it)"
 	case kSVG:
 		return "an SVG is a vector image; lens reads raster images (PNG, JPEG, GIF, WebP, BMP, TIFF)"
 	case kVideo:
@@ -69,15 +74,27 @@ var audioExt = map[string]bool{".wav": true, ".mp3": true, ".ogg": true, ".oga":
 var videoExt = map[string]bool{".mp4": true, ".mkv": true, ".webm": true, ".mov": true, ".avi": true, ".m4v": true}
 
 // sniffFile reads the start of a file and names its kind.
-func sniffFile(path string) fileKind {
+func sniffFile(path string) (fileKind, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return kOther
+		return kOther, errors.New(statError(path, err))
 	}
 	defer f.Close()
+	if fi, err := f.Stat(); err == nil && fi.IsDir() {
+		return kOther, fmt.Errorf("%s is a folder", path)
+	}
 	head := make([]byte, 512)
-	n, _ := io.ReadFull(f, head)
-	return sniff(head[:n], path)
+	n, err := io.ReadFull(f, head)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return kOther, fmt.Errorf("%s: %v", path, err)
+	}
+	if tag := id3Size(head[:n]); tag > 0 { // an ID3 tag can sit in front of FLAC or AAC too
+		if _, err := f.Seek(int64(tag), io.SeekStart); err == nil {
+			m, _ := io.ReadFull(f, head)
+			return afterID3(head[:m], path), nil
+		}
+	}
+	return sniff(head[:n], path), nil
 }
 
 func sniff(b []byte, path string) fileKind {
@@ -112,8 +129,11 @@ func sniff(b []byte, path string) fileKind {
 	case at(0, "ID3"):
 		return kMP3
 	case at(4, "ftyp"):
-		if at(8, "M4A ") || at(8, "M4B ") || ext == ".m4a" {
+		switch {
+		case at(8, "M4A ") || at(8, "M4B ") || ext == ".m4a":
 			return kM4A
+		case at(8, "avif") || at(8, "avis") || at(8, "heic") || at(8, "heix") || at(8, "hevc") || at(8, "mif1") || at(8, "msf1"):
+			return kHEIF
 		}
 		return kMedia
 	case at(0, "\x1a\x45\xdf\xa3"):
@@ -137,6 +157,19 @@ func sniff(b []byte, path string) fileKind {
 		return kAudioFF
 	}
 	return kOther
+}
+
+// afterID3 names what follows an ID3 tag.
+func afterID3(b []byte, path string) fileKind {
+	switch {
+	case len(b) >= 4 && string(b[:4]) == "fLaC":
+		return kFLAC
+	case len(b) >= 2 && b[0] == 0xff && b[1]&0xf6 == 0xf0: // ADTS AAC
+		return kAudioFF
+	case mp3Frame(b), strings.EqualFold(filepath.Ext(path), ".mp3"):
+		return kMP3
+	}
+	return kAudioFF // ffprobe will know
 }
 
 // bmpHeader: "BM" then a header size BMP knows, so text starting with BM

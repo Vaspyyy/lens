@@ -27,16 +27,14 @@ func dbText(x float64) string {
 	if x <= 0 {
 		return "-inf dBFS"
 	}
-	return fmt.Sprintf("%.1f dBFS", linToDB(x))
+	return strings.Replace(fmt.Sprintf("%.1f dBFS", linToDB(x)), "-0.0 ", "0.0 ", 1)
 }
 
 // secText is a time for people: 12 ms, 1.25 s, 3:25.4.
 func secText(s float64) string {
 	switch {
-	case s < 1:
+	case math.Round(s*1000) < 1000:
 		return fmt.Sprintf("%.0f ms", s*1000)
-	case s < 10:
-		return fmt.Sprintf("%.2f s", s)
 	}
 	return durText(secDur(s))
 }
@@ -56,8 +54,16 @@ func soundHeader(s *soundFacts) string {
 	}
 	parts = append(parts, secText(s.duration()), rateText(s.rate)+" "+channelsText(s.ch))
 	size := sizeText(s.info.size)
-	if s.info.lossy && s.duration() > 0.5 {
-		size += fmt.Sprintf(" (~%.0f kb/s)", float64(s.info.size)*8/s.duration()/1000)
+	switch {
+	case !s.info.lossy:
+	case s.info.bitrate > 0:
+		size += fmt.Sprintf(" (%.0f kb/s)", float64(s.info.bitrate)/1000)
+	case s.duration() > 0.5:
+		bytes := s.info.size
+		if s.info.audio > 0 { // not the cover art in the tag
+			bytes = s.info.audio
+		}
+		size += fmt.Sprintf(" (~%.0f kb/s)", float64(bytes)*8/s.duration()/1000)
 	}
 	return strings.Join(append(parts, size), ", ")
 }
@@ -83,6 +89,8 @@ func (s *soundFacts) rms() float64 {
 
 func lufsText(s *soundFacts) string {
 	switch {
+	case math.IsNaN(s.lufs):
+		return "loudness not measured (BS.1770 needs a sample rate of 4 kHz or more)"
 	case math.IsInf(s.lufs, -1):
 		return "loudness: silent"
 	case s.lufsEst:
@@ -298,6 +306,9 @@ func renderAudio(w io.Writer, s *soundFacts, o options) {
 			level += fmt.Sprintf("; DC offset %.3f in channel %d", dc, c+1)
 			break
 		}
+	}
+	if s.bad > 0 {
+		level += fmt.Sprintf("; %s weren't numbers (NaN or infinite), counted as 0", plural(s.bad, "sample"))
 	}
 	line("level", level)
 	i0, i1 := s.loudSpan()

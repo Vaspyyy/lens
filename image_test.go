@@ -28,11 +28,11 @@ func TestTransparentIcon(t *testing.T) {
 		t.Fatalf("exit %d", code)
 	}
 	mustContain(t, out, "PNG, 200x100 landscape 2:1, RGBA 8-bit",
-		"corners clear: a real transparent background",
+		"the border is clear: a real transparent background",
 		"drawn     101x60+49+20",
 		"#8f7cff",
 		"next: magick "+p+" -crop 101x60+49+20 +repage")
-	mustLack(t, out, "border")
+	mustLack(t, out, "\nborder")
 }
 
 func TestOpaqueNoAlphaChannel(t *testing.T) {
@@ -95,7 +95,7 @@ func TestCheckerNotInAPhoto(t *testing.T) {
 func TestBlankAndEmpty(t *testing.T) {
 	dir := t.TempDir()
 	out, _ := lensRun(t, savePNG(t, dir, "blank.png", opaqueRGB(canvas(64, 36, black))))
-	mustContain(t, out, "64x36 landscape 16:9", "one: every visible pixel is #000000 (blank)", "drawn     nothing")
+	mustContain(t, out, "64x36 landscape 16:9", "one: every pixel is #000000 (blank)", "drawn     nothing")
 	out, _ = lensRun(t, savePNG(t, dir, "empty.png", canvas(10, 10, clear)))
 	mustContain(t, out, "every pixel is fully clear: the image is empty", "nothing: every pixel is clear", "none visible")
 }

@@ -12,7 +12,7 @@ You can see an image but not measure it, and you can't hear a sound. `lens FILE`
 ```
 $ lens icon.png
 lens: icon.png  PNG, 512x512 square, RGBA 16-bit, 9 KB
-alpha     44% clear, under 0.1% partly (soft edges, glow or shadow); corners clear: a real transparent background
+alpha     44% clear, under 0.1% partly (soft edges, glow or shadow); the border is clear: a real transparent background
 drawn     384x384+64+64, 56% of the image (the rest is clear)
 colors    #8f7cff 87%, #e7e3ff 12%; 34 distinct colors
 next: magick icon.png -crop 384x384+64+64 +repage icon-trim.png   cut it to the drawn area
@@ -21,11 +21,11 @@ next: magick icon.png -crop 384x384+64+64 +repage icon-trim.png   cut it to the 
 | You want to know | Look at |
 | --- | --- |
 | Size, landscape or portrait, aspect ratio | the first line (`1536x1024 landscape 3:2`) |
-| Is the background really transparent? | `alpha`: `corners clear: a real transparent background` |
+| Is the background really transparent? | `alpha`: `the border is clear: a real transparent background` |
 | Did the generator paint a checkerboard instead? | `border    a checkerboard painted into the pixels ...: fake transparency` |
 | Halos or soft glow around a cut-out | the `partly` share in `alpha` |
 | Where the content is, to trim or center it | `drawn` (`WxH+X+Y`, ready for `magick -crop`) |
-| Is the screenshot blank or black? | `colors    one: every visible pixel is #000000 (blank)` |
+| Is the screenshot blank or black? | `colors    one: every pixel is #000000 (blank)` |
 
 `no alpha channel` means the file can't be transparent at all; `an alpha channel, but every pixel is opaque` means it could be but isn't.
 
@@ -38,7 +38,9 @@ changed  16,260 pixels (1.8%) in 2 spots, the largest difference 76%
   spot 2  221x31+900+30  6,851 pixels
 crop     one per spot, since one crop around all would be 87% of the image
   magick before.png -crop 253x63+884+14 +repage before-crop1.png
-  magick after.png -crop 253x63+884+14 +repage after-crop1.png
+  spot 1:
+  magick before.png -crop 129x129+24+584 +repage before-crop1.png
+  magick after.png -crop 129x129+24+584 +repage after-crop1.png
   ...
 ```
 
@@ -70,6 +72,7 @@ Compare takes with `lens a.mp3 b.mp3` (one line each). `-o clip.png` writes the 
 ## Other
 
 - A folder: `lens assets/` gives one line per image and sound (one level deep).
-- Opus, FLAC and M4A need ffmpeg installed; WAV, MP3, Ogg Vorbis and all images don't.
+- Opus, FLAC, M4A and low-rate (MPEG-2) MP3s need ffmpeg installed; WAV, 44.1/48 kHz MP3, Ogg Vorbis and all images don't.
+- A `warning` line means the file is cut short or damaged: the numbers are of the part that was read.
 - Video files are named, not read (use ffprobe).
 - Exit code 0 shown (diff too, changed or not); 2 bad input, a file not read, or a sound that ends early or stops decoding (shown with a `warning` line: the numbers are of the part read).

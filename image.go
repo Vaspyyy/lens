@@ -38,6 +38,7 @@ type imageFacts struct {
 	// from analyzeImage
 	clear, partly, visible int // pixel counts: alpha 0, alpha 1-254, alpha 128+
 	cornersClear           bool
+	borderClear            float64 // the share of the border's pixels that are clear
 	bg                     background
 	drawn                  image.Rectangle // what isn't background; empty: nothing
 	faint                  image.Rectangle // with faint pixels, when much bigger than drawn
@@ -88,8 +89,16 @@ func loadImage(path string, kind fileKind) (*imageFacts, error) {
 		if len(raw) >= 30 {
 			bpp := binary.LittleEndian.Uint16(raw[28:30])
 			f.stored = fmt.Sprintf("%d bits a pixel", bpp)
-			f.canAlpha = bpp == 32
+			// alpha only with a header that has an alpha mask, and one set
+			hs := binary.LittleEndian.Uint32(raw[14:18])
+			f.canAlpha = bpp == 32 && hs >= 56 && len(raw) >= 70 && binary.LittleEndian.Uint32(raw[66:70]) != 0
 		}
+	case kTIFF:
+		tiffFacts(f)
+	}
+	if cfg, _, err := image.DecodeConfig(bytes.NewReader(raw)); err == nil && int64(cfg.Width)*int64(cfg.Height) > maxPixels {
+		return nil, fmt.Errorf("%dx%d is over %s pixels; lens doesn't decode images this big (it would need about %.0f GB of memory)",
+			cfg.Width, cfg.Height, count(maxPixels), float64(cfg.Width)*float64(cfg.Height)*8/1e9)
 	}
 	var m image.Image
 	if kind == kGIF {
@@ -110,10 +119,70 @@ func loadImage(path string, kind fileKind) (*imageFacts, error) {
 	if f.stored == "" {
 		f.stored = goColorType(m)
 	}
-	if !f.canAlpha && kind != kPNG && kind != kJPEG && kind != kGIF && kind != kWebP {
-		f.canAlpha = hasAlphaType(m)
-	}
 	return f, nil
+}
+
+// maxPixels is the most lens decodes: 16384x16384, about 2 GB at work.
+const maxPixels = 16384 * 16384
+
+// tiffFacts reads the first directory: the photometric kind, the bits a
+// sample, and whether an extra sample is alpha.
+func tiffFacts(f *imageFacts) {
+	b := f.raw
+	if len(b) < 8 {
+		return
+	}
+	var bo binary.ByteOrder = binary.LittleEndian
+	if b[0] == 'M' {
+		bo = binary.BigEndian
+	}
+	off := int(bo.Uint32(b[4:8]))
+	if off < 8 || off+2 > len(b) {
+		return
+	}
+	photo, bits, alpha := -1, 1, false
+	for i := 0; i < int(bo.Uint16(b[off:])); i++ {
+		e := off + 2 + 12*i
+		if e+12 > len(b) {
+			break
+		}
+		tag, typ, cnt := bo.Uint16(b[e:]), bo.Uint16(b[e+2:]), bo.Uint32(b[e+4:])
+		first := func() int {
+			switch {
+			case typ == 3 && cnt <= 2:
+				return int(bo.Uint16(b[e+8:]))
+			case typ == 3:
+				if p := int(bo.Uint32(b[e+8:])); p >= 0 && p+2 <= len(b) {
+					return int(bo.Uint16(b[p:]))
+				}
+			case typ == 4 && cnt <= 1:
+				return int(bo.Uint32(b[e+8:]))
+			}
+			return 0
+		}
+		switch tag {
+		case 258:
+			bits = first()
+		case 262:
+			photo = first()
+		case 338: // ExtraSamples: 1 associated alpha, 2 unassociated
+			v := first()
+			alpha = v == 1 || v == 2
+		}
+	}
+	names := map[int]string{0: "gray", 1: "gray", 2: "RGB", 3: "palette", 5: "CMYK", 6: "YCbCr"}
+	name, ok := names[photo]
+	if !ok {
+		return
+	}
+	if alpha {
+		name = map[string]string{"gray": "gray+alpha", "RGB": "RGBA"}[name]
+		if name == "" {
+			name = names[photo] + " with alpha"
+		}
+	}
+	f.stored = fmt.Sprintf("%s %d-bit", name, bits)
+	f.canAlpha = alpha
 }
 
 // pngFacts reads IHDR and the chunks that matter: tRNS, PLTE, acTL, fcTL.
@@ -301,20 +370,6 @@ func goColorType(m image.Image) string {
 		return fmt.Sprintf("palette of %s", plural(len(m.(*image.Paletted).Palette), "color"))
 	}
 	return fmt.Sprintf("%T", m)
-}
-
-func hasAlphaType(m image.Image) bool {
-	switch m.(type) {
-	case *image.NRGBA, *image.RGBA, *image.NRGBA64, *image.RGBA64, *image.Alpha, *image.Alpha16:
-		return true
-	case *image.Paletted:
-		for _, c := range m.(*image.Paletted).Palette {
-			if _, _, _, a := c.RGBA(); a < 0xffff {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // toNRGBA gives the image as 8-bit non-premultiplied RGBA at the origin.

@@ -64,6 +64,9 @@ func run(args []string, out *bufio.Writer) int {
 	if c := runMany(out, items, notes, o); c > code {
 		code = c
 	}
+	if len(items) == 0 { // nothing to show is a failure too
+		code = 2
+	}
 	return code
 }
 
@@ -174,7 +177,13 @@ func expand(args []string) ([]item, []string, int) {
 			continue
 		}
 		if !fi.IsDir() {
-			items = append(items, item{path: a, kind: sniffFile(a)})
+			k, err := sniffFile(a)
+			if err != nil {
+				notes = append(notes, err.Error())
+				code = 2
+				continue
+			}
+			items = append(items, item{path: a, kind: k})
 			continue
 		}
 		entries, err := os.ReadDir(a)
@@ -191,7 +200,12 @@ func expand(args []string) ([]item, []string, int) {
 				folders++
 				continue
 			}
-			k := sniffFile(p)
+			k, err := sniffFile(p)
+			if err != nil {
+				notes = append(notes, err.Error())
+				code = 2
+				continue
+			}
 			if !k.isImage() && !k.isAudio() {
 				other++
 				continue

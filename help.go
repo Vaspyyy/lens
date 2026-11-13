@@ -24,8 +24,8 @@ type helpPair struct{ name, text string }
 // helpBlocks says what lens shows; paragraphs are kept as written.
 var helpBlocks = []string{
 	`Images (PNG, JPEG, GIF, WebP, BMP, TIFF): size and orientation, the color
-type as stored, real transparency (clear and partly clear pixels, clear
-corners) or a checkerboard painted in, the area drawn on as WxH+X+Y (the
+type as stored, real transparency (clear and partly clear pixels, a clear
+border) or a checkerboard painted in, the area drawn on as WxH+X+Y (the
 geometry magick -crop takes), and the main colors.`,
 	`Sounds (WAV, MP3, Ogg Vorbis; Opus, FLAC, M4A through ffmpeg): length,
 peak, RMS and loudness in LUFS, clipping, silence at the start and end and
@@ -45,7 +45,7 @@ var helpSections = []struct {
 	flags []helpFlag
 }{
 	{"DIFF", []helpFlag{
-		{"", "--fuzz", "P", "a channel may differ by P percent (default 0; 3 with a JPEG)"},
+		{"", "--fuzz", "P", "a channel may differ by P percent (default 0; 3 with a lossy image)"},
 		{"", "--pad", "N", "pixels around a suggested crop (default 16)"},
 	}},
 	{"SOUND", []helpFlag{

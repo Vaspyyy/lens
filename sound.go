@@ -3,6 +3,7 @@ package main
 import (
 	"io"
 	"math"
+	"math/bits"
 	"math/cmplx"
 	"sort"
 )
@@ -61,8 +62,11 @@ type soundFacts struct {
 	lufsEst bool    // a clip under 400 ms: over the whole clip
 
 	hop     int
-	ring    [fftSize]float32
+	clipAt  float64            // where full scale starts: 127/128 for 8-bit PCM
+	weights []float64          // each flatness's weight: the hop it was taken at
+	rings   [][fftSize]float32 // the last samples of each channel (up to 8)
 	pos     int
+	bad     int // samples that weren't numbers (NaN, infinite), counted as 0
 	filled  int64
 	since   int
 	spec    []specFrame
@@ -85,20 +89,19 @@ func newSound(path string, info audioInfo, threshold float64) *soundFacts {
 	s.sumsq = make([]float64, s.ch)
 	s.sum = make([]float64, s.ch)
 	s.run = make([]int, s.ch)
+	s.clipAt = 0.9999
+	if info.bits > 0 && info.bits < 16 {
+		full := math.Pow(2, float64(info.bits-1))
+		s.clipAt = (full-1)/full - 1e-7
+	}
 	s.blockLen = max(1, s.rate/1000)
 	s.subLen = max(1, s.rate/10)
 	s.kf = make([]kFilter, s.ch)
-	s.kw = make([]float64, s.ch)
+	s.kw = channelWeights(s.ch, info.mask)
 	for c := range s.kf {
 		s.kf[c] = newKFilter(float64(s.rate))
-		s.kw[c] = 1
-		if s.ch == 6 && c == 3 {
-			s.kw[c] = 0 // LFE
-		}
-		if s.ch == 6 && c >= 4 {
-			s.kw[c] = 1.41 // surround
-		}
 	}
+	s.rings = make([][fftSize]float32, min(s.ch, 8))
 	s.hop = 256
 	s.avg = make([]float64, fftSize/2+1)
 	s.fftBuf = make([]complex128, fftSize)
@@ -163,6 +166,8 @@ func analyzeAudioFile(path string, kind fileKind, o options) (*soundFacts, error
 	}
 	s.finish()
 	switch { // part of it was read: shown, with what went wrong
+	case info.warn != "": // what the container says is clearest ("ends inside an Ogg page")
+		s.warning = info.warn
 	case readErr != nil:
 		s.warning = readErr.Error()
 	case closeErr != nil:
@@ -175,16 +180,29 @@ func analyzeAudioFile(path string, kind fileKind, o options) (*soundFacts, error
 func (s *soundFacts) feed(p []float32) {
 	ch := s.ch
 	for i := 0; i+ch <= len(p); i += ch {
-		var mono, bp float64
+		var bp, l, r float64
 		for c := 0; c < ch; c++ {
 			x := float64(p[i+c])
+			if math.IsNaN(x) || math.IsInf(x, 0) {
+				s.bad++
+				x = 0
+			}
+			switch c {
+			case 0:
+				l = x
+			case 1:
+				r = x
+			}
+			if c < len(s.rings) {
+				s.rings[c][s.pos] = float32(x)
+			}
 			ax := math.Abs(x)
 			if ax > s.peak[c] {
 				s.peak[c] = ax
 			}
 			s.sumsq[c] += x * x
 			s.sum[c] += x
-			if ax >= 0.9999 {
+			if ax >= s.clipAt {
 				s.run[c]++
 			} else {
 				s.endRun(c)
@@ -193,14 +211,12 @@ func (s *soundFacts) feed(p []float32) {
 				s.over++
 			}
 			bp = max(bp, ax)
-			mono += x
 			if s.kw[c] != 0 {
 				y := s.kf[c].process(x)
 				s.subAcc += s.kw[c] * y * y
 			}
 		}
 		if ch >= 2 {
-			l, r := float64(p[i]), float64(p[i+1])
 			s.sumLR += l * r
 			s.maxDiff = max(s.maxDiff, math.Abs(l-r))
 		}
@@ -218,8 +234,7 @@ func (s *soundFacts) feed(p []float32) {
 			s.kTotal += s.subAcc
 			s.subAcc, s.subN = 0, 0
 		}
-		// spectrum
-		s.ring[s.pos] = float32(mono / float64(ch))
+		// spectrum: each channel's ring got its sample above
 		s.pos = (s.pos + 1) % fftSize
 		s.filled++
 		s.since++
@@ -251,22 +266,29 @@ func (s *soundFacts) pushBlock() {
 	}
 }
 
-// frame analyzes the last fftSize samples (zeros before the start).
+// frame analyzes the last fftSize samples (zeros before the start): the
+// power of each channel, added up, so channels that cancel in a mono mix
+// (opposite phase) still show.
 func (s *soundFacts) frame(center int64) {
 	var peak float64
-	for i := 0; i < fftSize; i++ {
-		x := float64(s.ring[(s.pos+i)%fftSize])
-		peak = max(peak, math.Abs(x))
-		s.fftBuf[i] = complex(x*s.window[i], 0)
+	pw := make([]float64, fftSize/2+1)
+	for c := range s.rings {
+		ring := &s.rings[c]
+		for i := 0; i < fftSize; i++ {
+			x := float64(ring[(s.pos+i)%fftSize])
+			peak = max(peak, math.Abs(x))
+			s.fftBuf[i] = complex(x*s.window[i], 0)
+		}
+		fft(s.fftBuf)
+		for k := range pw {
+			a := cmplx.Abs(s.fftBuf[k])
+			pw[k] += a * a
+		}
 	}
-	fft(s.fftBuf)
 	var f specFrame
 	f.center = center
 	f.loud = peak > dbToLin(s.threshold)
-	pw := make([]float64, fftSize/2+1)
 	for k := range pw {
-		a := cmplx.Abs(s.fftBuf[k])
-		pw[k] = a * a
 		f.bands[s.bandOf[k]] += float32(pw[k])
 	}
 	for j := 0; j < picBins; j++ {
@@ -277,8 +299,10 @@ func (s *soundFacts) frame(center int64) {
 		f.bins[j] = float32(sum / float64(s.binHi[j]-s.binLo[j]+1))
 	}
 	if f.loud {
+		// later frames stand for a longer stretch once the hop has grown
+		wt := float64(s.hop) / 256
 		for k := range pw {
-			s.avg[k] += pw[k]
+			s.avg[k] += wt * pw[k]
 		}
 		s.avgN++
 		// flatness per octave, weighted by the octave's energy: about 0.5
@@ -299,6 +323,7 @@ func (s *soundFacts) frame(center int64) {
 		}
 		if esum > 0 {
 			s.flats = append(s.flats, wsum/esum)
+			s.weights = append(s.weights, wt)
 		}
 	}
 	s.spec = append(s.spec, f)
@@ -329,12 +354,23 @@ func (s *soundFacts) finish() {
 	for c := range s.run {
 		s.endRun(c)
 	}
-	if len(s.spec) == 0 && s.filled > 0 { // shorter than one FFT: zero-padded
+	if len(s.spec) == 0 && s.filled > 0 { // shorter than one FFT: in its middle, zeros around
+		n := int(s.filled)
+		for c := range s.rings {
+			clip := append([]float32(nil), s.rings[c][:n]...)
+			s.rings[c] = [fftSize]float32{}
+			copy(s.rings[c][(fftSize-n)/2:], clip)
+		}
+		s.pos = 0
 		s.frame(s.filled / 2)
 	}
 	// integrated loudness, ITU-R BS.1770: 400 ms blocks every 100 ms, gated
 	// at -70 LUFS and 10 LU under the mean of what passes
 	s.lufs = math.Inf(-1)
+	if s.rate < 4000 { // the K-weighting's shelf sits above half the rate
+		s.lufs = math.NaN()
+		return
+	}
 	if len(s.sub) < 4 {
 		if s.frames > 0 {
 			z := (s.kTotal + s.subAcc) / float64(s.frames)
@@ -369,6 +405,34 @@ func (s *soundFacts) finish() {
 	if kept2, mean2 := gate(kept, rel); len(kept2) > 0 {
 		s.lufs = -0.691 + 10*math.Log10(mean2)
 	}
+}
+
+// channelWeights are BS.1770's channel weights, as ffmpeg's ebur128 gives
+// them: 0 for the LFE, 1.41 for back and side channels, 1 for the rest.
+// The layout is the WAV channel mask, or the usual one for the count.
+func channelWeights(ch int, mask uint32) []float64 {
+	usual := map[int]uint32{1: 0x4, 2: 0x3, 3: 0x7, 4: 0x33, 5: 0x37, 6: 0x3f, 7: 0x70f, 8: 0x63f}
+	if bits.OnesCount32(mask) != ch {
+		mask = usual[ch]
+	}
+	w := make([]float64, ch)
+	for i := range w {
+		w[i] = 1
+	}
+	i := 0
+	for bit := uint32(1); bit != 0 && i < ch; bit <<= 1 {
+		if mask&bit == 0 {
+			continue
+		}
+		switch bit {
+		case 0x8: // LFE
+			w[i] = 0
+		case 0x10, 0x20, 0x100, 0x200, 0x400, 0x8000, 0x10000, 0x20000: // back, side, top back
+			w[i] = 1.41
+		}
+		i++
+	}
+	return w
 }
 
 func dbToLin(db float64) float64 { return math.Pow(10, db/20) }
@@ -474,13 +538,26 @@ func (s *soundFacts) tone() (freq, flat, low, mid, high float64, ok bool) {
 			high += p
 		}
 	}
-	if total > 0 {
-		low, mid, high = low/total, mid/total, high/total
+	if total <= 0 {
+		return 0, 0, 0, 0, 0, false
 	}
-	if len(s.flats) > 0 {
-		fl := append([]float64(nil), s.flats...)
-		sort.Float64s(fl)
-		flat = fl[len(fl)/2]
+	low, mid, high = low/total, mid/total, high/total
+	if len(s.flats) > 0 { // the weighted median
+		idx := make([]int, len(s.flats))
+		var all float64
+		for i := range idx {
+			idx[i] = i
+			all += s.weights[i]
+		}
+		sort.Slice(idx, func(a, b int) bool { return s.flats[idx[a]] < s.flats[idx[b]] })
+		var acc float64
+		for _, i := range idx {
+			acc += s.weights[i]
+			if acc >= all/2 {
+				flat = s.flats[i]
+				break
+			}
+		}
 	}
 	return freq, flat, low, mid, high, true
 }

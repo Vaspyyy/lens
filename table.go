@@ -152,7 +152,9 @@ func soundRow(s *soundFacts) []string {
 		peak += " clipped"
 	}
 	lufs := "silent"
-	if !math.IsInf(s.lufs, -1) {
+	if math.IsNaN(s.lufs) {
+		lufs = "not measured"
+	} else if !math.IsInf(s.lufs, -1) {
 		lufs = fmt.Sprintf("%.1f", s.lufs)
 		if s.lufsEst {
 			lufs = "≈" + lufs
@@ -175,10 +177,10 @@ func alphaCell(f *imageFacts) string {
 		return "painted checkerboard"
 	case f.clear == total:
 		return "empty (all clear)"
-	case f.clear > 0 && f.cornersClear:
+	case f.clear > 0 && realClear(f):
 		return "clear background, " + pct(f.clear, total)
 	case f.clear > 0:
-		return pct(f.clear, total) + " clear, corners not"
+		return pct(f.clear, total) + " clear, border not"
 	case f.partly > 0:
 		return pct(f.partly, total) + " partly clear"
 	case f.canAlpha:
@@ -201,7 +203,7 @@ func colorsCell(f *imageFacts) string {
 	if f.visible == 0 {
 		return ""
 	}
-	if f.distinct == 1 {
+	if f.distinct == 1 && f.clear == 0 && f.partly == 0 {
 		return "blank " + hex(f.colors[0].c)
 	}
 	var cs []string

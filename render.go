@@ -5,6 +5,7 @@ import (
 	"image"
 	"image/color"
 	"io"
+	"math"
 	"path/filepath"
 	"strings"
 	"time"
@@ -28,8 +29,10 @@ func pct(n, total int) string {
 		return "100%"
 	case p < 0.1:
 		return "under 0.1%"
-	case p >= 99.9:
+	case p >= 99.95:
 		return "over 99.9%"
+	case p >= 99.5: // %.0f would say 100
+		return fmt.Sprintf("%.1f%%", p)
 	case p >= 10:
 		return fmt.Sprintf("%.0f%%", p)
 	}
@@ -81,15 +84,17 @@ func ratio(w, h int) string {
 
 func durText(d time.Duration) string {
 	s := d.Seconds()
-	switch {
-	case s < 10:
+	switch { // by the rounded value, so 59.97 s isn't "60.0 s"
+	case math.Round(s*100) < 1000:
 		return fmt.Sprintf("%.2f s", s)
-	case s < 60:
+	case math.Round(s*10) < 600:
 		return fmt.Sprintf("%.1f s", s)
-	case s < 3600:
-		return fmt.Sprintf("%d:%04.1f", int(s)/60, s-float64(int(s)/60*60))
+	case s < 3599.95:
+		t := math.Round(s * 10) // tenths, rounded before splitting: no 1:60.0
+		return fmt.Sprintf("%d:%04.1f", int(t)/600, float64(int(t)%600)/10)
 	}
-	return fmt.Sprintf("%d:%02d:%02d", int(s)/3600, int(s)/60%60, int(s)%60)
+	t := int(math.Round(s))
+	return fmt.Sprintf("%d:%02d:%02d", t/3600, t/60%60, t%60)
 }
 
 // imageHeader is the first line's facts: format, shape, color type, size.
@@ -120,13 +125,22 @@ func alphaText(f *imageFacts) string {
 	if f.partly > 0 {
 		s = fmt.Sprintf("%s clear, %s partly (soft edges, glow or shadow)", pct(f.clear, total), pct(f.partly, total))
 	}
+	return s + "; " + edgeText(f)
+}
+
+// realClear: the border is (nearly) all clear, as around a cut-out.
+func realClear(f *imageFacts) bool { return f.borderClear >= 0.9 }
+
+func edgeText(f *imageFacts) string {
 	switch {
+	case realClear(f):
+		return "the border is clear: a real transparent background"
 	case f.cornersClear:
-		s += "; corners clear: a real transparent background"
-	case f.clear > 0:
-		s += "; the corners aren't clear"
+		return "only the corners are clear (rounded corners?)"
+	case f.borderClear > 0:
+		return fmt.Sprintf("%s of the border is clear", pct(int(f.borderClear*1000), 1000))
 	}
-	return s
+	return "the border isn't clear"
 }
 
 func bgText(f *imageFacts) string {
@@ -172,8 +186,11 @@ func colorsText(f *imageFacts) string {
 	if f.visible == 0 {
 		return "none visible (every pixel is under half opaque)"
 	}
+	if f.distinct == 1 && f.clear == 0 && f.partly == 0 {
+		return fmt.Sprintf("one: every pixel is %s (blank)", hex(f.colors[0].c))
+	}
 	if f.distinct == 1 {
-		return fmt.Sprintf("one: every visible pixel is %s (blank)", hex(f.colors[0].c))
+		return fmt.Sprintf("one: every visible pixel is %s", hex(f.colors[0].c))
 	}
 	var parts []string
 	for _, c := range f.colors {
