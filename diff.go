@@ -201,12 +201,8 @@ func padBox(r image.Rectangle, pad, w, h int) image.Rectangle {
 // would mostly show what didn't change.
 func cropFor(d *diffResult, o options) crop {
 	c := crop{union: padBox(d.all, o.pad, d.w, d.h)}
-	spots := d.spots
-	if len(spots) > maxShow {
-		spots = spots[:maxShow]
-	}
 	var boxes []image.Rectangle
-	for _, s := range spots {
+	for _, s := range d.spots { // every spot, listed or not, is in a crop
 		boxes = append(boxes, padBox(s.box, o.pad, d.w, d.h))
 	}
 	// padded boxes that overlap become one
@@ -227,7 +223,7 @@ func cropFor(d *diffResult, o options) crop {
 	for _, b := range boxes {
 		sum += area(b)
 	}
-	if len(boxes) > 1 && area(c.union) > 2*sum && area(c.union)*4 > d.w*d.h {
+	if len(boxes) > 1 && len(boxes) <= maxShow && area(c.union) > 2*sum && area(c.union)*4 > d.w*d.h {
 		sort.Slice(boxes, func(i, j int) bool {
 			return boxes[i].Min.Y < boxes[j].Min.Y || boxes[i].Min.Y == boxes[j].Min.Y && boxes[i].Min.X < boxes[j].Min.X
 		})
@@ -284,7 +280,7 @@ func renderDiff(w io.Writer, d *diffResult, o options) {
 		for _, s := range d.spots[shown:] {
 			small += s.n
 		}
-		fmt.Fprintf(w, "  … %s more with %s\n", plural(rest, "spot"), plural(small, "pixel"))
+		fmt.Fprintf(w, "  … %s with %s\n", strings.Replace(plural(rest, "spot"), " ", " more ", 1), plural(small, "pixel"))
 	}
 	if d.strong*5 < d.changed && d.changed > 100 {
 		fmt.Fprintf(w, "faint    %s of the changes are under 10%%; --fuzz 10 leaves them out\n", pct(d.changed-d.strong, d.changed))

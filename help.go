@@ -69,7 +69,7 @@ var helpExamples = []helpPair{
 }
 
 var helpNotes = []helpPair{
-	{"exit code", "0 shown (diff too, changed or not), 2 bad input or a file not read"},
+	{"exit code", "0 shown (diff too, changed or not), 2 bad input, a file not read, or a sound cut short"},
 	{"NO_COLOR", "set it to turn colors off"},
 }
 

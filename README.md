@@ -68,7 +68,7 @@ crop     one per spot, since one crop around all would be 87% of the image
   magick after.png -crop 129x129+24+584 +repage after-crop2.png
 ```
 
-A pixel changed when one of its channels differs by more than `--fuzz` percent (0 by default, 3 when either image is a JPEG), compared on premultiplied colors so pixels that are clear in both are equal whatever color they hide. Changed pixels are grouped on an 8-pixel grid into spots, with spots closer than 32 pixels merged, and listed largest first with their tight boxes (up to 6, the rest counted). The crop is the box around every change plus `--pad` pixels (16), clamped to the image, printed once for both files so before and after line up. When there are several spots and that box would be more than twice their padded boxes together and over a quarter of the image, lens suggests one crop per spot instead. When over 80% of the changed pixels differ by under 10%, it says so and suggests `--fuzz 10`.
+A pixel changed when one of its channels differs by more than `--fuzz` percent (0 by default, 3 when either image is a JPEG), compared on premultiplied colors so pixels that are clear in both are equal whatever color they hide. Changed pixels are grouped on an 8-pixel grid into spots, with spots closer than 32 pixels merged, and listed largest first with their tight boxes (up to 6, the rest counted). The crop is the box around every change plus `--pad` pixels (16), clamped to the image, printed once for both files so before and after line up. When there are two to six spots (after padded boxes that overlap are merged) and that box would be more than twice their padded boxes together and over a quarter of the image, lens suggests one crop per spot instead. Every spot is inside a suggested crop, listed or not. When over 80% of the changed pixels differ by under 10%, it says so and suggests `--fuzz 10`.
 
 Images of different sizes are compared over their shared top-left area, and the first line says so. Identical files say `byte for byte`; the same pixels in different files say `every pixel is the same`. `-o diff.png` writes a picture to look at: the crop from before, from after, and from after with the changed pixels in red, side by side (scaled down when wider than 2,400 pixels or taller than 1,600).
 
@@ -125,7 +125,7 @@ One line per file, images and sounds in their own tables. A folder is read one l
 | `-h`, `--help` | help |
 | `-V`, `--version` | version |
 
-Exit code: 0 shown (`lens diff` too, whether the images differ or not), 2 bad input or a file that couldn't be read.
+Exit code: 0 shown (`lens diff` too, whether the images differ or not), 2 bad input, a file that couldn't be read, or a sound that ends before its header says it should or stops decoding partway (its card is still shown, of the part that was read, with a `warning` line).
 
 ## For coding agents
 

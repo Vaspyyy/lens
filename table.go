@@ -20,6 +20,7 @@ type result struct {
 
 // runMany writes one line per file, images and sounds in their own tables.
 func runMany(w io.Writer, items []item, notes []string, o options) int {
+	badCode := 0
 	res := make([]result, len(items))
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, min(runtime.NumCPU(), 8))
@@ -112,6 +113,19 @@ func runMany(w io.Writer, items []item, notes []string, o options) int {
 			rows = append(rows, soundRow(s))
 		}
 		writeTable(w, rows, each(len(snds)), "sound")
+		warned := false
+		for _, r := range snds {
+			if r.snd.warning != "" {
+				if !warned {
+					fmt.Fprintln(w, "warnings")
+					warned = true
+				}
+				fmt.Fprintf(w, "  %s: %s\n", r.snd.path, r.snd.warning)
+			}
+		}
+		if warned {
+			badCode = 2
+		}
 	}
 	if len(bad) > 0 {
 		fmt.Fprintln(w, "not read")
@@ -125,7 +139,7 @@ func runMany(w io.Writer, items []item, notes []string, o options) int {
 		}
 		return 2
 	}
-	return 0
+	return badCode
 }
 
 func soundRow(s *soundFacts) []string {

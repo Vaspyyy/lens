@@ -35,6 +35,7 @@ type soundFacts struct {
 	rate, ch  int
 	frames    int64
 	threshold float64 // silence, dBFS
+	warning   string  // decoding stopped early: the card is of the part read
 
 	peak, sumsq, sum []float64
 	clipRuns         int
@@ -161,6 +162,12 @@ func analyzeAudioFile(path string, kind fileKind, o options) (*soundFacts, error
 		return nil, closeErr
 	}
 	s.finish()
+	switch { // part of it was read: shown, with what went wrong
+	case readErr != nil:
+		s.warning = readErr.Error()
+	case closeErr != nil:
+		s.warning = closeErr.Error()
+	}
 	return s, nil
 }
 

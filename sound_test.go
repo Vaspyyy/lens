@@ -95,10 +95,10 @@ func TestWAVStreamAndTruncated(t *testing.T) {
 	raw, _ := os.ReadFile(cut)
 	os.WriteFile(cut, raw[:len(raw)-8000], 0o644) // half the data is gone
 	out, code := lensRun(t, cut)
-	if code != 0 {
-		t.Fatalf("exit %d: %s", code, out)
+	if code != 2 {
+		t.Fatalf("a truncated file: exit %d: %s", code, out)
 	}
-	mustContain(t, out, "500 ms, 8 kHz mono")
+	mustContain(t, out, "500 ms, 8 kHz mono", "warning   the file ends early: its header promises 1.00 s of sound, the file holds 500 ms")
 
 	// RF64: the sizes are in a ds64 chunk
 	plain := filepath.Join(dir, "plain.wav")

@@ -285,6 +285,9 @@ func renderAudio(w io.Writer, s *soundFacts, o options) {
 			fmt.Fprintf(w, "%-9s %s\n", label, text)
 		}
 	}
+	if s.warning != "" {
+		line("warning", s.warning+"; the rest is about the part that was read")
+	}
 	if s.frames == 0 {
 		line("samples", "none: it decodes to nothing")
 		return

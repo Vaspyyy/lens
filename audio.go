@@ -73,6 +73,16 @@ type wavReader struct {
 	ch     int
 	left   int64 // bytes left in the data chunk; -1: up to the end of the file
 	buf    []byte
+
+	declared int64 // the data chunk's size, -1 unknown
+	rate     int
+}
+
+// truncated says how much of the promised sound the file holds.
+func (w *wavReader) truncated() error {
+	frame := float64(w.bits / 8 * w.ch * w.rate)
+	return fmt.Errorf("the file ends early: its header promises %s of sound, the file holds %s",
+		secText(float64(w.declared)/frame), secText(float64(w.declared-w.left)/frame))
 }
 
 func openWAV(path string) (pcmReader, audioInfo, error) {
@@ -96,6 +106,7 @@ func readWAVHeader(f *os.File) (*wavReader, audioInfo, error) {
 		return nil, info, fmt.Errorf("a WAV file too short for its header")
 	}
 	rf64 := string(head[:4]) == "RF64"
+	riffSize := binary.LittleEndian.Uint32(head[4:8])
 	w := &wavReader{f: f, r: r, left: -1}
 	var ds64 int64 = -1
 	haveFmt := false
@@ -139,11 +150,13 @@ func readWAVHeader(f *os.File) (*wavReader, audioInfo, error) {
 			switch {
 			case rf64 && ds64 >= 0:
 				w.left = ds64
-			case n == 0 || n == 0xffffffff:
-				w.left = -1 // a stream that never wrote its size
+			case n == 0xffffffff, n == 0 && (riffSize == 0 || riffSize == 0xffffffff):
+				w.left = -1 // a stream that never wrote its sizes
 			default:
-				w.left = n
+				w.left = n // 0 too: an empty data chunk is empty
 			}
+			w.declared = w.left
+			w.rate = info.rate
 			info.ch = w.ch
 			switch {
 			case w.format == 1 && (w.bits == 8 || w.bits == 16 || w.bits == 24 || w.bits == 32):
@@ -224,6 +237,9 @@ func (w *wavReader) Read(p []float32) (int, error) {
 			k++
 		}
 	}
+	if (err == io.ErrUnexpectedEOF || err == io.EOF) && w.left > 0 {
+		return k, w.truncated()
+	}
 	if err == io.ErrUnexpectedEOF || (err == io.EOF && k > 0) {
 		err = nil
 	}
@@ -244,6 +260,8 @@ type mp3Reader struct {
 	skip int64 // frames still to drop at the start
 	left int64 // frames still to give; -1: all
 	buf  []byte
+	done int64 // frames given
+	rate int
 }
 
 func openMP3(path string) (pcmReader, audioInfo, error) {
@@ -269,7 +287,7 @@ func openMP3(path string) (pcmReader, audioInfo, error) {
 	if h.mono {
 		info.ch = 1
 	}
-	m := &mp3Reader{f: f, d: d, mono: h.mono, left: -1}
+	m := &mp3Reader{f: f, d: d, mono: h.mono, left: -1, rate: info.rate}
 	// go-mp3 decodes the Xing/Info frame as silence and doesn't remove the
 	// encoder's delay and padding, which LAME's tag records
 	if h.xing {
@@ -314,6 +332,13 @@ func (m *mp3Reader) Read(p []float32) (int, error) {
 			}
 			continue
 		}
+		if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+			return 0, fmt.Errorf("can't decode it past %s: %v", secText(float64(m.done)/float64(m.rate)), err)
+		}
+		if got == 0 && m.left > int64(1152) {
+			return 0, fmt.Errorf("the file ends early: its LAME header promises %s of sound, the file holds %s",
+				secText(float64(m.done+m.left)/float64(m.rate)), secText(float64(m.done)/float64(m.rate)))
+		}
 		k := 0
 		for i := 0; i+4 <= got; i += 4 {
 			l := float32(int16(binary.LittleEndian.Uint16(b[i:]))) / 32768
@@ -327,6 +352,7 @@ func (m *mp3Reader) Read(p []float32) (int, error) {
 		if m.left >= 0 {
 			m.left -= int64(got / 4)
 		}
+		m.done += int64(got / 4)
 		if k == 0 {
 			return 0, io.EOF
 		}

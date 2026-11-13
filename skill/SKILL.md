@@ -72,4 +72,4 @@ Compare takes with `lens a.mp3 b.mp3` (one line each). `-o clip.png` writes the 
 - A folder: `lens assets/` gives one line per image and sound (one level deep).
 - Opus, FLAC and M4A need ffmpeg installed; WAV, MP3, Ogg Vorbis and all images don't.
 - Video files are named, not read (use ffprobe).
-- Exit code 0 shown (diff too, changed or not); 2 bad input or a file not read.
+- Exit code 0 shown (diff too, changed or not); 2 bad input, a file not read, or a sound that ends early or stops decoding (shown with a `warning` line: the numbers are of the part read).

@@ -119,13 +119,13 @@ func parse(args []string) (options, int, string) {
 				o.picture = v
 			case "--fuzz":
 				f, err := strconv.ParseFloat(strings.TrimSuffix(v, "%"), 64)
-				if err != nil || f < 0 || f > 100 {
+				if err != nil || !(f >= 0 && f <= 100) {
 					return o, 2, fmt.Sprintf("--fuzz takes a percent from 0 to 100, not %q", v)
 				}
 				o.fuzz = f
 			case "--silence":
 				f, err := strconv.ParseFloat(strings.TrimSuffix(v, "dB"), 64)
-				if err != nil || f >= 0 || f < -150 {
+				if err != nil || !(f < 0 && f >= -150) {
 					return o, 2, fmt.Sprintf("--silence takes a level in dBFS below 0, like -50, not %q", v)
 				}
 				o.silence = f
@@ -269,6 +269,9 @@ func runOne(out io.Writer, it item, o options) int {
 				return 2
 			}
 			fmt.Fprintf(out, "picture   %s: the waveform (heights in dB) over a spectrogram (%s, bottom to top, on a log scale)\n", o.picture, freqRange(a))
+		}
+		if a.warning != "" {
+			return 2
 		}
 		return 0
 	}
