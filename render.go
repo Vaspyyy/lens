@@ -209,7 +209,7 @@ func colorsText(f *imageFacts) string {
 
 // renderImage writes the card of one image.
 func renderImage(w io.Writer, f *imageFacts, o options) {
-	fmt.Fprintf(w, "lens: %s  %s\n", f.path, imageHeader(f))
+	fmt.Fprintf(w, "lens: %s  %s\n", printable(f.path), imageHeader(f))
 	line := func(label, text string) {
 		if text != "" {
 			fmt.Fprintf(w, "%-9s %s\n", label, text)
@@ -224,8 +224,28 @@ func renderImage(w io.Writer, f *imageFacts, o options) {
 	line("colors", colorsText(f))
 	if !f.drawn.Empty() && area(f.drawn)*10 < f.w*f.h*9 {
 		fmt.Fprintf(w, "next: magick %s -crop %s +repage %s   cut it to the drawn area\n",
-			shellQuote(f.path), geom(f.drawn), shellQuote(sibling(f.path, "-trim", ".png")))
+			cmdPath(f.path), geom(f.drawn), cmdPath(sibling(f.path, "-trim", ".png")))
 	}
+}
+
+// cmdPath is a path for a printed command: quoted for the shell, and with
+// ./ before a name that starts with a dash, so magick doesn't take it for
+// an option.
+func cmdPath(p string) string {
+	if strings.HasPrefix(p, "-") {
+		p = "./" + p
+	}
+	return shellQuote(p)
+}
+
+// printable keeps a name on one line: control characters show as '?'.
+func printable(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return '?'
+		}
+		return r
+	}, s)
 }
 
 // sibling is a file next to path with a suffix on its name: a.png -> a-trim.png.

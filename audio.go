@@ -768,6 +768,7 @@ type probe struct {
 		BitsRaw     string `json:"bits_per_raw_sample"`
 		BitRate     string `json:"bit_rate"`
 		Layout      string `json:"channel_layout"`
+		Duration    string `json:"duration"`
 		Disposition struct {
 			AttachedPic int `json:"attached_pic"`
 		} `json:"disposition"`
@@ -810,7 +811,7 @@ func openFFmpeg(path string, kind fileKind, why error) (pcmReader, audioInfo, er
 	}
 	in = "file:" + in
 	pc := exec.Command("ffprobe", "-v", "error", "-show_entries",
-		"stream=codec_type,codec_name,sample_rate,channels,channel_layout,bits_per_raw_sample,bit_rate:stream_disposition=attached_pic:format=format_name",
+		"stream=codec_type,codec_name,sample_rate,channels,channel_layout,bits_per_raw_sample,bit_rate,duration:stream_disposition=attached_pic:format=format_name",
 		"-of", "json", in)
 	pc.Stderr = &stderr
 	js, err := pc.Output()
@@ -850,6 +851,11 @@ func openFFmpeg(path string, kind fileKind, why error) (pcmReader, audioInfo, er
 	info.layout = s.Layout
 	if s.CodecName == "opus" && layoutNames(s.Layout) == nil {
 		info.layout = "flat" // Opus with no known layout: ffmpeg weighs every channel 1
+	}
+	if p.Format.FormatName == "aiff" { // its COMM chunk counts the sample frames exactly
+		if d, err := strconv.ParseFloat(s.Duration, 64); err == nil && d > 0 {
+			info.expect, info.tol = d, 0.005
+		}
 	}
 	if art { // the file size holds a picture: take the stream's own rate, if it says
 		info.art = true
@@ -943,5 +949,6 @@ func lastLine(s string, err error) string {
 	}
 	lines := strings.Split(s, "\n")
 	// ffmpeg's "[aist#0:0/flac @ 0x55…] [dec:flac @ 0x55…] " says nothing to a reader
-	return reFFTags.ReplaceAllString(strings.TrimSpace(lines[len(lines)-1]), "")
+	l := reFFTags.ReplaceAllString(strings.TrimSpace(lines[len(lines)-1]), "")
+	return strings.ReplaceAll(l, " at PTS -9223372036854775808", "") // ffmpeg's "no time"
 }

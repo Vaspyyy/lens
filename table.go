@@ -234,7 +234,7 @@ func writeTable(w io.Writer, rows [][]string, n int, word string) {
 	for _, r := range rows {
 		for i, c := range r {
 			if i == 0 {
-				c = clipMiddle(c, 40)
+				c = clipMiddle(printable(c), 40)
 			}
 			widths[i] = max(widths[i], runeLen(c))
 		}
@@ -247,7 +247,7 @@ func writeTable(w io.Writer, rows [][]string, n int, word string) {
 		var cells []string
 		for j, c := range r {
 			if j == 0 {
-				c = clipMiddle(c, 40)
+				c = clipMiddle(printable(c), 40)
 			}
 			cells = append(cells, c+strings.Repeat(" ", widths[j]-runeLen(c)))
 		}
@@ -255,7 +255,22 @@ func writeTable(w io.Writer, rows [][]string, n int, word string) {
 	}
 }
 
-func runeLen(s string) int { return len([]rune(s)) }
+// runeLen is how many columns a string takes on a terminal: two for wide
+// characters (CJK, Hangul, fullwidth forms, emoji), one for the rest.
+func runeLen(s string) int {
+	n := 0
+	for _, r := range s {
+		switch {
+		case r >= 0x1100 && r <= 0x115f, r >= 0x2e80 && r <= 0xa4cf, r >= 0xac00 && r <= 0xd7a3,
+			r >= 0xf900 && r <= 0xfaff, r >= 0xfe30 && r <= 0xfe4f, r >= 0xff00 && r <= 0xff60,
+			r >= 0xffe0 && r <= 0xffe6, r >= 0x1f300 && r <= 0x1faff, r >= 0x20000 && r <= 0x3fffd:
+			n += 2
+		default:
+			n++
+		}
+	}
+	return n
+}
 
 // clipMiddle keeps the start and the end of a long name.
 func clipMiddle(s string, n int) string {

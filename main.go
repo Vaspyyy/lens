@@ -18,7 +18,7 @@ import (
 	"golang.org/x/term"
 )
 
-const version = "0.1.0"
+const version = "0.1.1"
 
 const defaultBudget = 60
 

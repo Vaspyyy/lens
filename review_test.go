@@ -914,3 +914,50 @@ func TestRecheck2FFmpegFiles(t *testing.T) {
 		near64(t, "bitrate with cover art", kbs, 125, 25)
 	}
 }
+
+// Sonnet 5.5, second re-check.
+func TestRecheck2SonnetSmall(t *testing.T) {
+	if got := rateText(8); got != "8 Hz" {
+		t.Errorf("rateText(8) = %q", got)
+	}
+	if got := cmdPath("-lead.png"); got != "./-lead.png" {
+		t.Errorf("cmdPath = %q", got)
+	}
+	if got := runeLen("日本.png"); got != 8 {
+		t.Errorf("runeLen = %d", got)
+	}
+	if got := printable("a\tb"); got != "a?b" {
+		t.Errorf("printable = %q", got)
+	}
+	if w := channelWeights(24, 0, ""); w[3] != 0 || w[18] != 0 {
+		t.Errorf("24 channels, ffmpeg's 22.2 (LFE and LFE2 silent): %v", w)
+	}
+}
+
+func TestRecheck2SonnetFFmpeg(t *testing.T) {
+	needFFmpeg(t)
+	dir := t.TempDir()
+	run := func(args ...string) bool {
+		return exec.Command("ffmpeg", append([]string{"-v", "error", "-y"}, args...)...).Run() == nil
+	}
+	aiff := filepath.Join(dir, "a.aiff")
+	if run("-f", "lavfi", "-i", "sine=d=3", aiff) {
+		r, _ := os.ReadFile(aiff)
+		cut := filepath.Join(dir, "cut.aiff")
+		os.WriteFile(cut, r[:len(r)/3], 0o644)
+		if out, code := lensRun(t, cut); code != 2 || !strings.Contains(out, "warning   the file ends early: its header promises 3.00 s") {
+			t.Errorf("a cut AIFF: exit %d\n%s", code, out)
+		}
+		if out, code := lensRun(t, aiff); code != 0 || strings.Contains(out, "warning") {
+			t.Errorf("a whole AIFF: exit %d\n%s", code, out)
+		}
+	}
+	m2 := filepath.Join(dir, "m2.mp3")
+	if run("-f", "lavfi", "-i", "sine=f=440:d=4:sample_rate=22050", "-c:a", "libmp3lame", m2) {
+		r, _ := os.ReadFile(m2)
+		os.WriteFile(m2, append(r, make([]byte, 3000)...), 0o644)
+		if out, code := lensRun(t, m2); code != 0 || strings.Contains(out, "warning") {
+			t.Errorf("zero padding after an MPEG-2 MP3: exit %d\n%s", code, out)
+		}
+	}
+}

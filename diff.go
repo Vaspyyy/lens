@@ -324,7 +324,7 @@ func renderDiff(out io.Writer, d *diffResult, o options) {
 			fmt.Fprintf(w, "  %s:\n", spotList(c.spots[i]))
 		}
 		for j, f := range []*imageFacts{a, b} {
-			fmt.Fprintf(w, "  magick %s -crop %s +repage %s\n", shellQuote(f.path), geom(box), shellQuote(sibling(f.path, stems[j]+suffix, ".png")))
+			fmt.Fprintf(w, "  magick %s -crop %s +repage %s\n", cmdPath(f.path), geom(box), cmdPath(sibling(f.path, stems[j]+suffix, ".png")))
 		}
 	}
 }

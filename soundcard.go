@@ -10,6 +10,9 @@ import (
 )
 
 func rateText(r int) string {
+	if r < 1000 {
+		return strconv.Itoa(r) + " Hz"
+	}
 	return strconv.FormatFloat(float64(r)/1000, 'f', -1, 64) + " kHz"
 }
 
@@ -302,7 +305,7 @@ func abs64(x int64) int64 {
 
 // renderAudio writes the card of one sound.
 func renderAudio(w io.Writer, s *soundFacts, o options) {
-	fmt.Fprintf(w, "lens: %s  %s\n", s.path, soundHeader(s))
+	fmt.Fprintf(w, "lens: %s  %s\n", printable(s.path), soundHeader(s))
 	line := func(label, text string) {
 		if text != "" {
 			fmt.Fprintf(w, "%-9s %s\n", label, text)

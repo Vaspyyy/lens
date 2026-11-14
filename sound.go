@@ -167,6 +167,10 @@ func analyzeAudioFile(path string, kind fileKind, o options) (*soundFacts, error
 		return nil, closeErr
 	}
 	s.finish()
+	if closeErr != nil && strings.Contains(closeErr.Error(), "Error submitting packet to decoder") &&
+		info.expect > 0 && s.duration() >= info.expect-expectTol(info) {
+		closeErr = nil // junk after the last frame (zero padding): the sound is whole
+	}
 	switch { // part of it was read: shown, with what went wrong
 	case info.warn != "": // what the container says is clearest ("ends inside an Ogg page")
 		s.warning = info.warn
@@ -446,7 +450,7 @@ func channelWeights(ch int, mask uint32, layout string) []float64 {
 		return byName(names)
 	}
 	// ffmpeg's guesses for counts past 8, without a mask
-	if guess := ffLayouts[map[int]string{10: "5.1.4", 12: "7.1.4", 14: "9.1.4", 16: "9.1.6"}[ch]]; bits.OnesCount32(mask) != ch && len(guess) == ch {
+	if guess := ffLayouts[map[int]string{10: "5.1.4", 12: "7.1.4", 14: "9.1.4", 16: "9.1.6", 24: "22.2"}[ch]]; bits.OnesCount32(mask) != ch && len(guess) == ch {
 		return byName(guess)
 	}
 	// what ffmpeg assumes for a count: 2.1, 4.0, 5.0(side), 5.1(side), 6.1, 7.1
