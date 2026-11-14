@@ -703,3 +703,64 @@ func TestRecheckSonnetSlips(t *testing.T) {
 	out, _ = lensRun(t, short)
 	mustContain(t, out, "warning   the file ends early: 4 bytes short of the data its header promises")
 }
+
+// GPT-6.1 Terra, second re-check: a chained Ogg whose first stream lost its
+// last page says so, though the last stream ends fine.
+func TestRecheck2ChainedStreamCut(t *testing.T) {
+	raw, err := os.ReadFile("testdata/tone.ogg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var offs []int
+	for i := 0; i+27 <= len(raw); {
+		offs = append(offs, i)
+		n := int(raw[i+26])
+		body := 0
+		for _, s := range raw[i+27 : i+27+n] {
+			body += int(s)
+		}
+		i += 27 + n + body
+	}
+	p := filepath.Join(t.TempDir(), "chain.ogg")
+	os.WriteFile(p, append(append([]byte(nil), raw[:offs[len(offs)-1]]...), raw...), 0o644)
+	// this fixture's sound is all in its last page, so the first link has
+	// none left: an error, with the damage named first
+	out, code := lensRun(t, p)
+	if code != 2 || !strings.Contains(out, "the file is damaged: an Ogg stream lacks its last page where the next one starts") {
+		t.Errorf("exit %d\n%s", code, out)
+	}
+	clean := filepath.Join(t.TempDir(), "clean.ogg")
+	os.WriteFile(clean, append(append([]byte(nil), raw...), raw...), 0o644)
+	if out, code := lensRun(t, clean); code != 0 || strings.Contains(out, "warning") {
+		t.Errorf("a clean chain: exit %d\n%s", code, out)
+	}
+}
+
+func TestRecheck2ChainedStreamCutDecodes(t *testing.T) {
+	needFFmpeg(t)
+	dir := t.TempDir()
+	a, b := filepath.Join(dir, "a.ogg"), filepath.Join(dir, "b.ogg")
+	for p, f := range map[string]string{a: "sine=frequency=440:duration=5", b: "sine=frequency=880:duration=1"} {
+		if err := exec.Command("ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f, "-c:a", "libvorbis", p).Run(); err != nil {
+			t.Skip(err)
+		}
+	}
+	ra, _ := os.ReadFile(a)
+	rb, _ := os.ReadFile(b)
+	last := 0
+	for i := 0; i+27 <= len(ra); {
+		last = i
+		n := int(ra[i+26])
+		body := 0
+		for _, s := range ra[i+27 : i+27+n] {
+			body += int(s)
+		}
+		i += 27 + n + body
+	}
+	p := filepath.Join(dir, "chain.ogg")
+	os.WriteFile(p, append(append([]byte(nil), ra[:last]...), rb...), 0o644)
+	out, code := lensRun(t, p)
+	if code != 2 || !strings.Contains(out, "warning   the file is damaged: an Ogg stream lacks its last page") || !strings.Contains(out, "Ogg Vorbis, ") {
+		t.Errorf("exit %d\n%s", code, out)
+	}
+}

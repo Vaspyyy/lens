@@ -643,8 +643,10 @@ func oggPages(path string) ([]int64, string) {
 	defer f.Close()
 	r := bufio.NewReaderSize(f, 1<<16)
 	var off int64
-	var starts []int64 // where each logical stream begins
-	ended := false
+	var starts []int64        // where each link of a chain begins
+	open := map[uint32]bool{} // streams begun and not yet ended
+	prevBOS := false
+	problem := ""
 	page := make([]byte, 27+255+255*255)
 	for {
 		n, err := io.ReadFull(r, page[:27])
@@ -673,16 +675,27 @@ func oggPages(path string) ([]int64, string) {
 		if oggCRC(page[:size]) != want {
 			return starts, fmt.Sprintf("the file is damaged: the Ogg page at byte %s fails its checksum", count(int(off)))
 		}
-		if page[5]&2 != 0 {
-			starts = append(starts, off)
+		serial := binary.LittleEndian.Uint32(page[14:18])
+		bos, eos := page[5]&2 != 0, page[5]&4 != 0
+		if bos {
+			if !prevBOS { // a new link of a chain (streams grouped in one link start together)
+				if len(open) > 0 && problem == "" {
+					problem = fmt.Sprintf("the file is damaged: an Ogg stream lacks its last page where the next one starts, at byte %s", count(int(off)))
+				}
+				starts = append(starts, off)
+			}
+			open[serial] = true
 		}
-		ended = page[5]&4 != 0
+		if eos {
+			delete(open, serial)
+		}
+		prevBOS = bos
 		off += int64(size)
 	}
-	if !ended && off > 0 {
-		return starts, "the file may be cut short: its last Ogg page doesn't end the stream"
+	if len(open) > 0 && problem == "" {
+		problem = "the file may be cut short: its last Ogg page doesn't end the stream"
 	}
-	return starts, ""
+	return starts, problem
 }
 
 var oggTable = func() [256]uint32 {
