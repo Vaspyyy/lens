@@ -74,6 +74,30 @@ func analyzeImage(f *imageFacts) {
 		}
 	}
 	f.borderClear = float64(clearN) / float64(n)
+	// rounded corners: on each side, the clear pixels are short runs from
+	// both ends, each under a quarter of the side, and none in between
+	runs := func(n int, clearAt func(int) bool) bool {
+		a := 0
+		for a < n && clearAt(a) {
+			a++
+		}
+		b := 0
+		for b < n-a && clearAt(n-1-b) {
+			b++
+		}
+		if a == 0 || b == 0 || a*4 > n || b*4 > n {
+			return false
+		}
+		for i := a; i < n-b; i++ {
+			if clearAt(i) {
+				return false
+			}
+		}
+		return true
+	}
+	f.rounded = w >= 8 && h >= 8 &&
+		runs(w, func(i int) bool { return corner(i, 0) }) && runs(w, func(i int) bool { return corner(i, h-1) }) &&
+		runs(h, func(i int) bool { return corner(0, i) }) && runs(h, func(i int) bool { return corner(w-1, i) })
 
 	f.colors = mainColors(&hist, &sums, f.visible)
 	full := image.Rect(0, 0, w, h)

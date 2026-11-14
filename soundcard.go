@@ -57,7 +57,10 @@ func soundHeader(s *soundFacts) string {
 	parts = append(parts, secText(s.duration()), rateText(s.rate)+" "+channelsText(s.ch))
 	size := sizeText(s.info.size)
 	switch {
-	case !s.info.lossy:
+	case !s.info.lossy, s.warning != "": // a part read: its rate would mislead
+	case s.info.bitrate > 0:
+		size += fmt.Sprintf(" (~%.0f kb/s)", float64(s.info.bitrate)/1000)
+	case s.info.art && s.info.audio == 0: // the size holds a picture: no rate from it
 	case s.duration() > 0.5:
 		bytes := s.info.size
 		if s.info.audio > 0 { // not the cover art in the tag
@@ -141,6 +144,9 @@ func stereoText(s *soundFacts) string {
 		return "the left channel is silent" + first
 	}
 	corr := s.sumLR / math.Sqrt(l*r)
+	if math.Abs(corr) < 0.005 {
+		corr = 0 // no "-0.00"
+	}
 	bal := 10 * math.Log10(l/r)
 	switch {
 	case corr < -0.9:

@@ -87,7 +87,13 @@ func runMany(w io.Writer, items []item, notes []string, o options) int {
 	}
 	// share the rows between the tables, each at least a few
 	sections := 0
-	for _, n := range []int{len(imgs), len(snds), len(bad)} {
+	warned := 0
+	for _, r := range snds {
+		if r.snd.warning != "" {
+			warned++
+		}
+	}
+	for _, n := range []int{len(imgs), len(snds), len(bad), warned} {
 		if n > 0 {
 			sections++
 		}
@@ -113,17 +119,22 @@ func runMany(w io.Writer, items []item, notes []string, o options) int {
 			rows = append(rows, soundRow(s))
 		}
 		writeTable(w, rows, each(len(snds)), "sound")
-		warned := false
+		var warns []string
 		for _, r := range snds {
 			if r.snd.warning != "" {
-				if !warned {
-					fmt.Fprintln(w, "warnings")
-					warned = true
-				}
-				fmt.Fprintf(w, "  %s: %s\n", r.snd.path, r.snd.warning)
+				warns = append(warns, fmt.Sprintf("  %s: %s", r.snd.path, r.snd.warning))
 			}
 		}
-		if warned {
+		if len(warns) > 0 {
+			fmt.Fprintln(w, "warnings")
+			n := each(len(warns))
+			for i, l := range warns {
+				if i == n && len(warns) > n+1 {
+					fmt.Fprintf(w, "  … %s\n", strings.Replace(plural(len(warns)-n, "warning"), " ", " more ", 1))
+					break
+				}
+				fmt.Fprintln(w, l)
+			}
 			badCode = 2
 		}
 	}

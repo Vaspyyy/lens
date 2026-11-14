@@ -39,6 +39,9 @@ type audioInfo struct {
 	mask     uint32  // WAV's channel mask: which speaker each channel is
 	layout   string  // ffmpeg's channel layout: "5.1(side)", "2.1", "FL+FR+LFE"
 	expect   float64 // seconds of sound a header promises, when ffmpeg decodes
+	tol      float64 // how much shorter than expect is still whole (0: 1%)
+	bitrate  int     // bits a second from ffprobe, when cover art is in the file size
+	art      bool    // the file has cover art
 }
 
 // maxChannels is the most channels lens takes a file to have.
@@ -72,10 +75,16 @@ func openAudio(path string, kind fileKind) (pcmReader, audioInfo, error) {
 		err = errUnsupported
 	}
 	if errors.Is(err, errUnsupported) {
-		expect := info.expect // what the header promised, for after ffmpeg
+		pre := info // what the header said, for after ffmpeg
 		r, info, err = openFFmpeg(path, kind, err)
 		if info.expect == 0 {
-			info.expect = expect
+			info.expect, info.tol = pre.expect, pre.tol
+		}
+		if info.warn == "" {
+			info.warn = pre.warn
+		}
+		if info.audio == 0 {
+			info.audio = pre.audio
 		}
 	}
 	if err != nil && oggWarn != "" { // say what's wrong with the file first
@@ -86,12 +95,6 @@ func openAudio(path string, kind fileKind) (pcmReader, audioInfo, error) {
 		info.warn = oggWarn
 	}
 	return r, info, err
-}
-
-func haveFFmpeg() bool {
-	_, e1 := exec.LookPath("ffmpeg")
-	_, e2 := exec.LookPath("ffprobe")
-	return e1 == nil && e2 == nil
 }
 
 // --- WAV
@@ -112,7 +115,7 @@ type wavReader struct {
 
 // chunkNext: the next bytes start a RIFF chunk (four letters), so an empty
 // data chunk is really empty and not a size left at 0.
-func chunkNext(r *bufio.Reader) bool {
+func chunkNext(r *bufio.Reader, remain int64) bool {
 	b, _ := r.Peek(8)
 	if len(b) < 8 {
 		return true // nothing after it: empty either way
@@ -122,7 +125,8 @@ func chunkNext(r *bufio.Reader) bool {
 			return false
 		}
 	}
-	return true
+	// and its size fits in the file, which sound that happens to be letters doesn't
+	return 8+int64(binary.LittleEndian.Uint32(b[4:8])) <= remain
 }
 
 // truncated says how much of the promised sound the file holds.
@@ -158,6 +162,11 @@ func readWAVHeader(f *os.File) (*wavReader, audioInfo, error) {
 	rf64 := string(head[:4]) == "RF64"
 	riffSize := binary.LittleEndian.Uint32(head[4:8])
 	w := &wavReader{f: f, r: r, left: -1}
+	var fileSize int64
+	if fi, err := f.Stat(); err == nil {
+		fileSize = fi.Size()
+	}
+	off := int64(12) // bytes read so far
 	var ds64 int64 = -1
 	haveFmt := false
 	for {
@@ -167,6 +176,10 @@ func readWAVHeader(f *os.File) (*wavReader, audioInfo, error) {
 		}
 		id := string(ch[:4])
 		n := int64(binary.LittleEndian.Uint32(ch[4:]))
+		off += 8
+		if id != "data" {
+			off += n + n%2
+		}
 		switch id {
 		case "fmt ":
 			if n < 16 || n > 1<<12 {
@@ -205,14 +218,19 @@ func readWAVHeader(f *os.File) (*wavReader, audioInfo, error) {
 			if !haveFmt {
 				return nil, info, fmt.Errorf("a WAV file with its data before its fmt chunk")
 			}
+			remain := fileSize - off // bytes after the data chunk's header
 			switch {
-			case rf64 && ds64 >= 0 && ds64 < 1<<48:
+			case rf64 && ds64 > 0 && ds64 < 1<<48:
 				w.left = ds64
+			case rf64 && ds64 == 0 && chunkNext(r, remain):
+				w.left = 0
 			case rf64:
-				w.left = -1 // an impossible ds64 size: read what's there
-			case n == 0xffffffff, n >= 0x7fff0000:
-				w.left = -1 // a placeholder, as a WAV written to a pipe has
-			case n == 0 && (riffSize == 0 || riffSize == 0xffffffff || !chunkNext(r)):
+				w.left = -1 // ds64 sizes left at 0 (written to a pipe), or impossible
+			case n == 0xffffffff:
+				w.left = -1 // a placeholder, as ffmpeg writes to a pipe
+			case n >= 0x7fff0000 && n > remain && (n == 0x7fffffff || n&0xfff == 0):
+				w.left = -1 // another tool's round placeholder, past the end of the file
+			case n == 0 && (riffSize == 0 || riffSize == 0xffffffff || !chunkNext(r, remain)):
 				w.left = -1 // a writer stopped before it fixed the sizes
 			default:
 				w.left = n // 0 too: an empty data chunk is empty
@@ -232,8 +250,9 @@ func readWAVHeader(f *os.File) (*wavReader, audioInfo, error) {
 				if name == "" {
 					name = fmt.Sprintf("format %d, %d-bit", w.format, w.bits)
 				}
-				if w.left > 0 && w.byteRate > 0 { // ffmpeg decodes it; the header says how long
-					info.expect = float64(w.left) / float64(w.byteRate)
+				if w.left > 0 && w.left > remain { // ffmpeg decodes it: say if bytes are missing
+					info.warn = fmt.Sprintf("the file ends early: it holds %s of the %s bytes of sound data its header promises",
+						count(int(remain)), count(int(w.left)))
 				}
 				return nil, info, fmt.Errorf("%w: WAV with %s", errUnsupported, name)
 			}
@@ -263,7 +282,7 @@ func (w *wavReader) Read(p []float32) (int, error) {
 		if w.left > 0 {
 			return 0, w.truncated()
 		}
-		return 0, fmt.Errorf("the data chunk ends in a partial sample frame (%s left over)", plural(got, "byte"))
+		return 0, io.EOF // a stray byte past the last whole frame: nothing to play
 	}
 	if n == 0 {
 		return 0, io.EOF
@@ -273,10 +292,10 @@ func (w *wavReader) Read(p []float32) (int, error) {
 	}
 	b := w.buf[:n]
 	got, err := io.ReadFull(w.r, b)
-	got = got / frame * frame
 	if w.left >= 0 {
-		w.left -= int64(got)
+		w.left -= int64(got) // every byte read, a part of a frame too
 	}
+	got = got / frame * frame
 	b = b[:got]
 	k := 0
 	switch {
@@ -369,6 +388,7 @@ func openMP3(path string) (pcmReader, audioInfo, error) {
 				n -= h.delay + h.padding
 			}
 			info.expect = float64(n) / float64(h.rate)
+			info.tol = 2 * float64(h.spf) / float64(h.rate) // ffmpeg trims exactly: two frames' slack
 		}
 		return nil, info, fmt.Errorf("%w: an MPEG-2 or 2.5 MP3", errUnsupported)
 	}
@@ -387,11 +407,14 @@ func openMP3(path string) (pcmReader, audioInfo, error) {
 	// encoder's delay and padding, which LAME's tag records
 	if h.xing {
 		m.skip = int64(h.spf)
-		if h.lame {
+		switch {
+		case h.lame:
 			m.skip += int64(h.delay) + 529
 			if h.frames > 0 {
 				m.left = int64(h.frames)*int64(h.spf) - int64(h.delay) - int64(h.padding)
 			}
+		case h.frames > 0: // a Xing count without a LAME tag: whole frames
+			m.left = int64(h.frames) * int64(h.spf)
 		}
 	}
 	return m, info, nil
@@ -431,7 +454,7 @@ func (m *mp3Reader) Read(p []float32) (int, error) {
 			return 0, fmt.Errorf("can't decode it past %s: %v", secText(float64(m.done)/float64(m.rate)), err)
 		}
 		if got == 0 && m.left >= 576 { // half a frame short or more: frames went missing
-			return 0, fmt.Errorf("frames are missing (cut short or damaged): its LAME header promises %s of sound, the file holds %s",
+			return 0, fmt.Errorf("frames are missing (cut short or damaged): its header promises %s of sound, the file holds %s",
 				secText(float64(m.done+m.left)/float64(m.rate)), secText(float64(m.done)/float64(m.rate)))
 		}
 		k := 0
@@ -553,7 +576,6 @@ type vorbisReader struct {
 	starts []int64 // where each chained stream begins
 	next   int     // the stream to open when this one ends
 	size   int64
-	done   int64 // samples given, for a message
 }
 
 func (v *vorbisReader) open(i int) (*oggvorbis.Reader, error) {
@@ -759,7 +781,7 @@ var reFFTags = regexp.MustCompile(`^(\[[^\]]*\]\s*)+`)
 
 var rePCM = regexp.MustCompile(`^pcm_([suf])(\d+)(le|be|planar)?$`)
 
-var codecNames = map[string]string{"pcm_alaw": "A-law", "pcm_mulaw": "µ-law", "opus": "Opus", "vorbis": "Vorbis", "flac": "FLAC", "aac": "AAC", "mp3": "MP3",
+var codecNames = map[string]string{"pcm_alaw": "A-law", "pcm_mulaw": "µ-law", "adpcm_ms": "MS ADPCM", "adpcm_ima_wav": "IMA ADPCM", "adpcm_yamaha": "Yamaha ADPCM", "opus": "Opus", "vorbis": "Vorbis", "flac": "FLAC", "aac": "AAC", "mp3": "MP3",
 	"alac": "ALAC", "speex": "Speex", "wmav2": "WMA", "ac3": "AC-3", "eac3": "E-AC-3"}
 
 func openFFmpeg(path string, kind fileKind, why error) (pcmReader, audioInfo, error) {
@@ -805,13 +827,15 @@ func openFFmpeg(path string, kind fileKind, why error) (pcmReader, audioInfo, er
 		info.warn = "ffprobe reports a problem: " + strings.ReplaceAll(lastLine(stderr.String(), err), in, path)
 	}
 	audio := -1
-	video := false
+	video, art := false, false
 	for i, s := range p.Streams {
 		switch {
 		case s.CodecType == "audio" && audio < 0:
 			audio = i
 		case s.CodecType == "video" && s.Disposition.AttachedPic == 0:
 			video = true
+		case s.CodecType == "video":
+			art = true
 		}
 	}
 	if video {
@@ -824,6 +848,13 @@ func openFFmpeg(path string, kind fileKind, why error) (pcmReader, audioInfo, er
 	info.rate, _ = strconv.Atoi(s.SampleRate)
 	info.ch = s.Channels
 	info.layout = s.Layout
+	if s.CodecName == "opus" && layoutNames(s.Layout) == nil {
+		info.layout = "flat" // Opus with no known layout: ffmpeg weighs every channel 1
+	}
+	if art { // the file size holds a picture: take the stream's own rate, if it says
+		info.art = true
+		info.bitrate, _ = strconv.Atoi(s.BitRate)
+	}
 	if info.rate <= 0 || info.ch <= 0 || info.ch > maxChannels {
 		return nil, info, fmt.Errorf("ffprobe gives %d channels at %d Hz", info.ch, info.rate)
 	}

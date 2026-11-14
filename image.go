@@ -39,6 +39,7 @@ type imageFacts struct {
 	clear, partly, visible int // pixel counts: alpha 0, alpha 1-254, alpha 128+
 	cornersClear           bool
 	borderClear            float64 // the share of the border's pixels that are clear
+	rounded                bool    // clear only in short runs from each corner
 	bg                     background
 	drawn                  image.Rectangle // what isn't background; empty: nothing
 	faint                  image.Rectangle // with faint pixels, when much bigger than drawn

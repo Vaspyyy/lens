@@ -135,7 +135,7 @@ func edgeText(f *imageFacts) string {
 	switch {
 	case realClear(f):
 		return "the border is clear: a real transparent background"
-	case f.cornersClear && f.borderClear < 0.05:
+	case f.cornersClear && (f.rounded || f.borderClear < 0.05):
 		return "only the corners are clear (rounded corners?)"
 	case f.borderClear > 0:
 		return fmt.Sprintf("%s of the border is clear", pct(int(f.borderClear*1000), 1000))

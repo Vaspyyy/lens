@@ -174,11 +174,19 @@ func analyzeAudioFile(path string, kind fileKind, o options) (*soundFacts, error
 		s.warning = readErr.Error()
 	case closeErr != nil:
 		s.warning = closeErr.Error()
-	case info.expect > 0 && s.duration() < info.expect*0.99-0.01:
+	case info.expect > 0 && s.duration() < info.expect-expectTol(info):
 		s.warning = fmt.Sprintf("the file ends early: its header promises %s of sound, the file holds %s",
 			secText(info.expect), secText(s.duration()))
 	}
 	return s, nil
+}
+
+// expectTol is how much shorter than its header's length a sound may be.
+func expectTol(info audioInfo) float64 {
+	if info.tol > 0 {
+		return info.tol
+	}
+	return info.expect*0.01 + 0.01
 }
 
 // feed takes interleaved samples, a whole number of frames.
@@ -417,8 +425,8 @@ func (s *soundFacts) finish() {
 // The layout is ffmpeg's for the decoded channels, the WAV channel mask,
 // or the usual one for the count.
 func channelWeights(ch int, mask uint32, layout string) []float64 {
-	if names := layoutNames(layout); len(names) == ch {
-		w := make([]float64, ch)
+	byName := func(names []string) []float64 {
+		w := make([]float64, len(names))
 		for i, n := range names {
 			switch n {
 			case "LFE", "LFE2":
@@ -430,6 +438,16 @@ func channelWeights(ch int, mask uint32, layout string) []float64 {
 			}
 		}
 		return w
+	}
+	if layout == "flat" {
+		return byName(make([]string, ch))
+	}
+	if names := layoutNames(layout); len(names) == ch {
+		return byName(names)
+	}
+	// ffmpeg's guesses for counts past 8, without a mask
+	if guess := ffLayouts[map[int]string{10: "5.1.4", 12: "7.1.4", 14: "9.1.4", 16: "9.1.6"}[ch]]; bits.OnesCount32(mask) != ch && len(guess) == ch {
+		return byName(guess)
 	}
 	// what ffmpeg assumes for a count: 2.1, 4.0, 5.0(side), 5.1(side), 6.1, 7.1
 	usual := map[int]uint32{1: 0x4, 2: 0x3, 3: 0xb, 4: 0x107, 5: 0x607, 6: 0x60f, 7: 0x70f, 8: 0x63f}
@@ -494,7 +512,12 @@ cube FL+FR+BL+BR+TFL+TFR+TBL+TBR
 7.1.2 FL+FR+FC+LFE+BL+BR+SL+SR+TFL+TFR
 7.1.4 FL+FR+FC+LFE+BL+BR+SL+SR+TFL+TFR+TBL+TBR
 7.2.3 FL+FR+FC+LFE+BL+BR+SL+SR+TFL+TFR+TBC+LFE2
-9.1.4 FL+FR+FC+LFE+BL+BR+FLC+FRC+SL+SR+TFL+TFR+TBL+TBR`, "\n") {
+9.1.4 FL+FR+FC+LFE+BL+BR+FLC+FRC+SL+SR+TFL+TFR+TBL+TBR
+9.1.6 FL+FR+FC+LFE+BL+BR+FLC+FRC+SL+SR+TFL+TFR+TBL+TBR+TSL+TSR
+hexadecagonal FL+FR+FC+BL+BR+BC+SL+SR+TFL+TFC+TFR+TBL+TBC+TBR+WL+WR
+binaural BIL+BIR
+downmix DL+DR
+22.2 FL+FR+FC+LFE+BL+BR+FLC+FRC+BC+SL+SR+TC+TFL+TFC+TFR+TBL+TBC+TBR+LFE2+TSL+TSR+BFC+BFL+BFR`, "\n") {
 		name, chans, _ := strings.Cut(l, " ")
 		m[name] = strings.Split(chans, "+")
 	}

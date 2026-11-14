@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"fmt"
 	"hash/crc32"
 	"image"
 	"image/color"
@@ -76,8 +77,10 @@ func TestReviewPartialFrame(t *testing.T) {
 	if code != 2 || !strings.Contains(out, "warning   the file ends early") {
 		t.Errorf("declared 5, has 4: exit %d\n%s", code, out)
 	}
+	// Opus 5.5, second re-check: a stray byte past the last whole frame
+	// isn't a cut file
 	out, code = lensRun(t, wav(5, []byte{0, 0x40, 0, 0x40, 7}))
-	if code != 2 || !strings.Contains(out, "ends in a partial sample frame (1 byte left over)") {
+	if code != 0 || strings.Contains(out, "warning") {
 		t.Errorf("an odd byte: exit %d\n%s", code, out)
 	}
 }
@@ -94,7 +97,7 @@ func TestReviewTruncatedMP3(t *testing.T) {
 	if code != 2 {
 		t.Fatalf("exit %d: %s", code, out)
 	}
-	mustContain(t, out, "warning   frames are missing (cut short or damaged): its LAME header promises 490 ms of sound")
+	mustContain(t, out, "warning   frames are missing (cut short or damaged): its header promises 490 ms of sound")
 }
 
 // GPT-6.1 Terra: with more spots than are listed, the crop still covers all
@@ -612,8 +615,12 @@ func TestRecheckFFmpegPaths(t *testing.T) {
 		raw, _ := os.ReadFile(p)
 		cut := filepath.Join(dir, "cut-"+c.name)
 		os.WriteFile(cut, raw[:len(raw)/2], 0o644)
+		want := "warning   the file ends early: its header promises 3.00 s"
+		if c.name == "alaw.wav" { // a WAV: by its bytes, not its byte rate
+			want = "warning   the file ends early: it holds "
+		}
 		out, code := lensRun(t, cut)
-		if code != 2 || !strings.Contains(out, "warning   the file ends early: its header promises 3.00 s") {
+		if code != 2 || !strings.Contains(out, want) {
 			t.Errorf("cut %s: exit %d\n%s", c.name, code, out)
 		}
 	}
@@ -762,5 +769,148 @@ func TestRecheck2ChainedStreamCutDecodes(t *testing.T) {
 	out, code := lensRun(t, p)
 	if code != 2 || !strings.Contains(out, "warning   the file is damaged: an Ogg stream lacks its last page") || !strings.Contains(out, "Ogg Vorbis, ") {
 		t.Errorf("exit %d\n%s", code, out)
+	}
+}
+
+// Opus 5.5, second re-check.
+func TestRecheck2WAVSizes(t *testing.T) {
+	dir := t.TempDir()
+	plain := filepath.Join(dir, "plain.wav")
+	writeWAV(t, plain, wavSpec{rate: 8000}, sine(8000, 440, 1, -10))
+	raw, _ := os.ReadFile(plain)
+	fmtAt, dataAt := bytes.Index(raw, []byte("fmt ")), bytes.Index(raw, []byte("data"))
+	// an RF64 written to a pipe: every size a placeholder, ds64 all 0
+	var rf bytes.Buffer
+	rf.WriteString("RF64\xff\xff\xff\xffWAVEds64")
+	binary.Write(&rf, binary.LittleEndian, uint32(28))
+	binary.Write(&rf, binary.LittleEndian, []uint64{0, 0, 0})
+	binary.Write(&rf, binary.LittleEndian, uint32(0))
+	rf.Write(raw[fmtAt:dataAt])
+	rf.WriteString("data\xff\xff\xff\xff")
+	rf.Write(raw[dataAt+8:])
+	p := filepath.Join(dir, "rfpipe.wav")
+	os.WriteFile(p, rf.Bytes(), 0o644)
+	if out, code := lensRun(t, p); code != 0 || !strings.Contains(out, "1.00 s, 8 kHz mono") {
+		t.Errorf("RF64 from a pipe: exit %d\n%s", code, out)
+	}
+	// data size 0, then sound that happens to start with letters
+	x := make([]float64, 8000)
+	for i := range x {
+		x[i] = float64(0x4142) / 32768
+	}
+	z := filepath.Join(dir, "zero.wav")
+	writeWAV(t, z, wavSpec{rate: 8000, dataSize: 0}, x)
+	zr, _ := os.ReadFile(z)
+	binary.LittleEndian.PutUint32(zr[4:8], 36) // a real RIFF size
+	binary.LittleEndian.PutUint32(zr[bytes.Index(zr, []byte("data"))+4:], 0)
+	os.WriteFile(z, zr, 0o644)
+	if out, code := lensRun(t, z); code != 0 || !strings.Contains(out, "1.00 s") {
+		t.Errorf("size 0, letters after: exit %d\n%s", code, out)
+	}
+	// short by 3 bytes says 3
+	short := filepath.Join(dir, "short.wav")
+	writeWAV(t, short, wavSpec{rate: 8000}, sine(8000, 440, 3, -10))
+	sr, _ := os.ReadFile(short)
+	os.WriteFile(short, sr[:len(sr)-3], 0o644)
+	out, _ := lensRun(t, short)
+	mustContain(t, out, "3 bytes short of the data its header promises")
+}
+
+func TestRecheck2XingWithoutLAME(t *testing.T) {
+	raw, err := os.ReadFile("testdata/tone.mp3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := append([]byte(nil), raw...)
+	for _, tag := range []string{"LAME", "Lavc", "Lavf"} {
+		for i := bytes.Index(b[:4096], []byte(tag)); i >= 0; i = bytes.Index(b[:4096], []byte(tag)) {
+			copy(b[i:], []byte{0, 0, 0, 0})
+		}
+	}
+	dir := t.TempDir()
+	whole := filepath.Join(dir, "nolame.mp3")
+	os.WriteFile(whole, b, 0o644)
+	if out, code := lensRun(t, whole); code != 0 || strings.Contains(out, "warning") {
+		t.Errorf("whole file without a LAME tag: exit %d\n%s", code, out)
+	}
+	cut := filepath.Join(dir, "cut.mp3")
+	os.WriteFile(cut, b[:len(b)*2/3], 0o644)
+	if out, code := lensRun(t, cut); code != 2 || !strings.Contains(out, "frames are missing") {
+		t.Errorf("cut without a LAME tag: exit %d\n%s", code, out)
+	}
+}
+
+func TestRecheck2Corners(t *testing.T) {
+	dir := t.TempDir()
+	m := canvas(200, 200, color.NRGBA{51, 102, 153, 255})
+	// clear corners of radius 50
+	for y := 0; y < 200; y++ {
+		for x := 0; x < 200; x++ {
+			cx, cy := min(max(x, 50), 149), min(max(y, 50), 149)
+			if (x-cx)*(x-cx)+(y-cy)*(y-cy) > 50*50 {
+				m.SetNRGBA(x, y, clear)
+			}
+		}
+	}
+	out, _ := lensRun(t, savePNG(t, dir, "round.png", m))
+	mustContain(t, out, "only the corners are clear (rounded corners?)")
+	if w := channelWeights(12, 0, ""); w[3] != 0 || w[4] != 1.41 {
+		t.Errorf("12 channels, ffmpeg's 7.1.4: %v", w)
+	}
+	for _, v := range channelWeights(16, 0, "flat") {
+		if v != 1 {
+			t.Fatalf("Opus without a layout weighs every channel 1")
+		}
+	}
+}
+
+func TestRecheck2TableWarnings(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 12; i++ {
+		p := filepath.Join(dir, fmt.Sprintf("cut%02d.wav", i))
+		writeWAV(t, p, wavSpec{rate: 8000}, sine(8000, 440, 0.5, -10))
+		r, _ := os.ReadFile(p)
+		os.WriteFile(p, r[:len(r)-100], 0o644)
+	}
+	out, code := lensRun(t, dir, "-b", "12")
+	if code != 2 || !strings.Contains(out, "more warnings") {
+		t.Errorf("exit %d\n%s", code, out)
+	}
+	if n := strings.Count(out, "\n"); n > 16 {
+		t.Errorf("%d lines for -b 12:\n%s", n, out)
+	}
+}
+
+func TestRecheck2FFmpegFiles(t *testing.T) {
+	needFFmpeg(t)
+	dir := t.TempDir()
+	run := func(args ...string) bool {
+		return exec.Command("ffmpeg", append([]string{"-v", "error", "-y"}, args...)...).Run() == nil
+	}
+	y := filepath.Join(dir, "y.wav")
+	if run("-f", "lavfi", "-i", "sine=d=1.37:r=44100", "-c:a", "adpcm_yamaha", y) {
+		if out, code := lensRun(t, y); code != 0 || strings.Contains(out, "warning") {
+			t.Errorf("a whole Yamaha ADPCM WAV: exit %d\n%s", code, out)
+		}
+	}
+	m2 := filepath.Join(dir, "m2.mp3")
+	if run("-f", "lavfi", "-i", "sine=f=440:d=60:sample_rate=22050", "-c:a", "libmp3lame", "-b:a", "32k", m2) {
+		r, _ := os.ReadFile(m2)
+		cut := filepath.Join(dir, "m2cut.mp3")
+		os.WriteFile(cut, r[:len(r)-3000], 0o644)
+		if out, code := lensRun(t, cut); code != 2 || !strings.Contains(out, "the file ends early") {
+			t.Errorf("an MPEG-2 MP3 short by under 1%%: exit %d\n%s", code, out)
+		}
+	}
+	a, cover, art := filepath.Join(dir, "a.m4a"), filepath.Join(dir, "cover.png"), filepath.Join(dir, "art.m4a")
+	big := canvas(600, 600, white)
+	for i := range big.Pix {
+		big.Pix[i] = byte(i * 7919 % 251) // noise: a picture that doesn't compress
+	}
+	savePNG(t, dir, "cover.png", big)
+	if run("-f", "lavfi", "-i", "sine=d=2", "-c:a", "aac", "-b:a", "128k", a) && run("-i", a, "-i", cover, "-map", "0", "-map", "1", "-c", "copy", "-disposition:v", "attached_pic", art) {
+		out, _ := lensRun(t, art)
+		kbs := field(t, out, `\(~(\d+) kb/s\)`)
+		near64(t, "bitrate with cover art", kbs, 125, 25)
 	}
 }
